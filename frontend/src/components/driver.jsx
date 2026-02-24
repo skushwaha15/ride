@@ -39,7 +39,7 @@ useEffect(() => {
 
 // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [socket]);
-  }, [socket]);
+ 
 
   // Request ride function
   const requestRide = async () => {
