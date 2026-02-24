@@ -15,28 +15,30 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
   const [assignedDriver, setAssignedDriver] = useState(null);
 
   // Socket listeners for ride updates
-  useEffect(() => {
-    if (!socket) return;
+useEffect(() => {
+  if (!socket) return;
 
-    socket.on('ride-accepted', (data) => {
-      console.log("✅ Ride accepted by driver:", data);
-      setSearchingForDriver(false);
-      setRideStatus('accepted');
-      setAssignedDriver(data.driverId);
-    });
+  socket.on('ride-accepted', (data) => {
+    console.log("✅ Ride accepted by driver:", data);
+    setSearchingForDriver(false);
+    setRideStatus('accepted');
+    setAssignedDriver(data.driverId);
+  });
 
-    socket.on('ride-rejected', (data) => {
-      console.log("❌ Ride rejected:", data);
-      setSearchingForDriver(false);
-      alert('Driver rejected your ride. Finding another driver...');
-      // Try to find another driver
-      requestRide();
-    });
+  socket.on('ride-rejected', (data) => {
+    console.log("❌ Ride rejected:", data);
+    setSearchingForDriver(false);
+    alert('Driver rejected your ride. Finding another driver...');
+    requestRide();
+  });
 
-    return () => {
-      socket.off('ride-accepted');
-      socket.off('ride-rejected');
-    };
+  return () => {
+    socket.off('ride-accepted');
+    socket.off('ride-rejected');
+  };
+
+// eslint-disable-next-line react-hooks/exhaustive-deps
+}, [socket]);
   }, [socket]);
 
   // Request ride function
