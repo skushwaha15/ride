@@ -3,8 +3,7 @@ import {
   FaUser,
   FaPhone,
   FaTimes,
-  FaClock,
-  FaMapMarkerAlt
+  FaClock
 } from "react-icons/fa";
 import axios from 'axios';
 
