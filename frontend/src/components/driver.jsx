@@ -13,33 +13,157 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
   const [searchingForDriver, setSearchingForDriver] = useState(false);
   const [rideStatus, setRideStatus] = useState(null);
   const [assignedDriver, setAssignedDriver] = useState(null);
+  const [currentRide, setCurrentRide] = useState(null);
+  const [otp, setOtp] = useState(null);
+  const [showOtp, setShowOtp] = useState(false);
+  const [driverLocation, setDriverLocation] = useState(null);
+  const [rideStartTime, setRideStartTime] = useState(null);
+  const [rideTimer, setRideTimer] = useState(null);
+  const [pickupAddress, setPickupAddress] = useState('');
+  const [dropAddress, setDropAddress] = useState('');
 
-  // Socket listeners for ride updates
-useEffect(() => {
-  if (!socket) return;
+  // ✅ FIX 1: Get address names with error handling
+  useEffect(() => {
+    const getAddress = async (lat, lng, setter) => {
+      try {
+        console.log(`📍 Getting address for: ${lat}, ${lng}`);
+        const res = await axios.get(`http://localhost:5000/api/geocode/reverse?lat=${lat}&lng=${lng}`);
+        if (res.data.success) {
+          setter(res.data.shortAddress || res.data.address);
+          console.log("✅ Address received:", res.data.shortAddress);
+        } else {
+          // Fallback to coordinates
+          setter(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+        }
+      } catch (error) {
+        console.error("❌ Error getting address:", error.message);
+        // Fallback to coordinates on error
+        setter(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+      }
+    };
+    
+    if (pickupLocation) {
+      getAddress(pickupLocation.lat, pickupLocation.lng, setPickupAddress);
+    } else {
+      setPickupAddress('Pickup location');
+    }
+    
+    if (dropLocation) {
+      getAddress(dropLocation.lat, dropLocation.lng, setDropAddress);
+    } else {
+      setDropAddress('Drop location');
+    }
+  }, [pickupLocation, dropLocation]);
 
-  socket.on('ride-accepted', (data) => {
-    console.log("✅ Ride accepted by driver:", data);
-    setSearchingForDriver(false);
-    setRideStatus('accepted');
-    setAssignedDriver(data.driverId);
-  });
+  // ✅ FIX 2: Listen for driver location updates with retry
+  useEffect(() => {
+    if (!socket) {
+      console.log("❌ Socket not available");
+      return;
+    }
+    
+    console.log("📍 Setting up location listener, socket connected:", socket.connected);
+    console.log("📍 Current ride status:", rideStatus);
+    console.log("📍 Assigned driver:", assignedDriver);
+    
+    const handleDriverLocation = (data) => {
+      console.log("📍 Driver location received:", data);
+      setDriverLocation(data.location);
+    };
+    
+    socket.on('driver-location', handleDriverLocation);
+    
+    // Request location after 3 seconds if not received
+    const timeout = setTimeout(() => {
+      if (!driverLocation && currentRide) {
+        console.log("⚠️ No location received, requesting...");
+        socket.emit('request-driver-location', { rideId: currentRide._id });
+      }
+    }, 3000);
+    
+    return () => {
+      socket.off('driver-location', handleDriverLocation);
+      clearTimeout(timeout);
+    };
+  }, [socket, currentRide, rideStatus, assignedDriver]);
 
-  socket.on('ride-rejected', (data) => {
-    console.log("❌ Ride rejected:", data);
-    setSearchingForDriver(false);
-    alert('Driver rejected your ride. Finding another driver...');
-    requestRide();
-  });
+  // ✅ FIX 3: Timer for started ride
+  useEffect(() => {
+    let interval;
+    if (rideStatus === 'STARTED' && rideStartTime) {
+      interval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - rideStartTime) / 1000);
+        const minutes = Math.floor(elapsed / 60);
+        const seconds = elapsed % 60;
+        setRideTimer(`${minutes}:${seconds.toString().padStart(2, '0')}`);
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [rideStatus, rideStartTime]);
 
-  return () => {
-    socket.off('ride-accepted');
-    socket.off('ride-rejected');
-  };
+  // ✅ FIX 4: Socket listeners for ride updates
+  useEffect(() => {
+    if (!socket) return;
 
-// eslint-disable-next-line react-hooks/exhaustive-deps
-}, [socket]);
- 
+    const handleRideAccepted = (data) => {
+      console.log("✅ Ride accepted by driver:", data);
+      setSearchingForDriver(false);
+      setRideStatus('accepted');
+      setAssignedDriver(data.driverId);
+    };
+
+    const handleRideRejected = (data) => {
+      console.log("❌ Ride rejected:", data);
+      setSearchingForDriver(false);
+      alert('Driver rejected your ride. Finding another driver...');
+      requestRide();
+    };
+
+    const handleRideStatusUpdated = (data) => {
+      console.log("🔄 Ride status updated:", data);
+      setRideStatus(data.status);
+      setCurrentRide(data.ride);
+      
+      if (data.status === 'ACCEPTED') {
+        setSearchingForDriver(false);
+        alert('✅ Driver found! They are on the way to pickup.');
+      } else if (data.status === 'ARRIVING') {
+        alert('🚗 Driver has arrived at pickup location!');
+      } else if (data.status === 'STARTED') {
+        setRideStartTime(Date.now());
+        alert('🎉 Your ride has started! Enjoy the journey.');
+      } else if (data.status === 'COMPLETED') {
+        setRideStartTime(null);
+        setRideTimer(null);
+        alert('💰 Ride completed! Thank you for riding with us.');
+        setRideStatus(null);
+        setCurrentRide(null);
+      } else if (data.status === 'CANCELLED') {
+        alert('❌ Ride was cancelled');
+        setRideStatus(null);
+        setCurrentRide(null);
+        setSearchingForDriver(false);
+      }
+    };
+
+    const handleRideOtp = (data) => {
+      console.log("🔑 Ride OTP received:", data);
+      setOtp(data.otp);
+      setShowOtp(true);
+    };
+
+    socket.on('ride-accepted', handleRideAccepted);
+    socket.on('ride-rejected', handleRideRejected);
+    socket.on('ride-status-updated', handleRideStatusUpdated);
+    socket.on('ride-otp', handleRideOtp);
+
+    return () => {
+      socket.off('ride-accepted', handleRideAccepted);
+      socket.off('ride-rejected', handleRideRejected);
+      socket.off('ride-status-updated', handleRideStatusUpdated);
+      socket.off('ride-otp', handleRideOtp);
+    };
+  }, [socket]);
 
   // Request ride function
   const requestRide = async () => {
@@ -52,7 +176,7 @@ useEffect(() => {
     
     try {
       const res = await axios.post('http://localhost:5000/api/rides/request', {
-        userId: localStorage.getItem('userId') || 'user_' + Date.now(), // Generate temporary user ID
+        userId: localStorage.getItem('userId') || 'user_' + Date.now(),
         pickupLocation: {
           lat: pickupLocation.lat,
           lng: pickupLocation.lng,
@@ -69,8 +193,6 @@ useEffect(() => {
       });
       
       console.log("✅ Ride requested:", res.data);
-      
-      // Save ride ID for tracking
       localStorage.setItem('currentRideId', res.data.ride._id);
       
     } catch (error) {
@@ -86,8 +208,27 @@ useEffect(() => {
     setRideStatus(null);
   };
 
+  // Cancel ride function
+  const cancelRide = async () => {
+    if (!currentRide) return;
+    
+    try {
+      await axios.post('http://localhost:5000/api/rides/update-status', {
+        rideId: currentRide._id,
+        status: 'CANCELLED'
+      });
+      
+      setRideStatus('CANCELLED');
+      setCurrentRide(null);
+      setSearchingForDriver(false);
+      alert('❌ Ride cancelled');
+    } catch (error) {
+      console.error("Error cancelling ride:", error);
+    }
+  };
+
+  // Socket connection effect
   useEffect(() => {
-    // Connect to socket
     const newSocket = io('http://localhost:5000', {
       transports: ['websocket'],
       reconnection: true
@@ -213,8 +354,8 @@ useEffect(() => {
         <h3>🔍 Searching for nearby drivers...</h3>
         <p>Please wait while we find you the best ride</p>
         <div style={styles.tripDetails}>
-          <p>📍 From: {pickupLocation?.address || 'Pickup'}</p>
-          <p>🏁 To: {dropLocation?.address || 'Drop'}</p>
+          <p>📍 From: {pickupAddress || 'Pickup'}</p>
+          <p>🏁 To: {dropAddress || 'Drop'}</p>
           <p>💰 Fare: ₹{fare}</p>
           <p>📏 Distance: {distance} km</p>
         </div>
@@ -225,29 +366,101 @@ useEffect(() => {
     );
   }
 
-  // Show driver assigned screen
-  if (rideStatus === 'accepted') {
+  // Show driver assigned screen with live location
+  if (rideStatus === 'accepted' || rideStatus === 'ARRIVING' || rideStatus === 'STARTED') {
     return (
       <div style={styles.assignedContainer}>
-        <div style={styles.successIcon}>✅</div>
-        <h3>Driver Assigned!</h3>
-        <p>Your driver is on the way</p>
+        <div style={styles.successIcon}>
+          {rideStatus === 'accepted' && '✅'}
+          {rideStatus === 'ARRIVING' && '🚗'}
+          {rideStatus === 'STARTED' && '🎉'}
+        </div>
+        
+        <h3>
+          {rideStatus === 'accepted' && 'Driver Assigned!'}
+          {rideStatus === 'ARRIVING' && 'Driver Arrived!'}
+          {rideStatus === 'STARTED' && 'Ride In Progress!'}
+        </h3>
+        
+        <p>
+          {rideStatus === 'accepted' && 'Your driver is on the way'}
+          {rideStatus === 'ARRIVING' && 'Driver is waiting at pickup location'}
+          {rideStatus === 'STARTED' && 'Enjoy your journey!'}
+        </p>
+        
+        {/* Live Location Card with Debug */}
+        <div style={styles.liveLocationCard}>
+          <h4>📍 Live Location</h4>
+          {driverLocation ? (
+            <div>
+              <div style={styles.locationRow}>
+                <span style={styles.movingCar}>🚗</span>
+                <span style={styles.locationText}>
+                  {driverLocation.lat.toFixed(4)}, {driverLocation.lng.toFixed(4)}
+                </span>
+              </div>
+              <p style={styles.locationTime}>
+                Last updated: {new Date().toLocaleTimeString()}
+              </p>
+            </div>
+          ) : (
+            <div>
+              <p>Waiting for driver location...</p>
+              <div style={styles.locationLoader}></div>
+              <p style={styles.locationDebug}>
+                Socket: {socket?.connected ? '✅' : '❌'}<br/>
+                Status: {rideStatus}<br/>
+                Driver: {assignedDriver?.slice(-6) || 'none'}<br/>
+                <button 
+                  onClick={() => {
+                    console.log("🔄 Manual location request");
+                    if (currentRide) {
+                      socket?.emit('request-driver-location', { rideId: currentRide._id });
+                    }
+                  }}
+                  style={styles.debugBtn}
+                >
+                  🔄 Request Location
+                </button>
+              </p>
+            </div>
+          )}
+        </div>
+        
         <div style={styles.driverInfo}>
           <div style={styles.driverCard}>
             <FaUser size={40} />
             <div>
-              <h4>Driver {assignedDriver}</h4>
-              <p>⚡ 5 min away</p>
-              <p>🚗 Vehicle: Swift (RJ14 XX 1234)</p>
+              <h4>Driver {assignedDriver?.slice(-6) || 'Unknown'}</h4>
+              <p>⚡ {rideStatus === 'accepted' ? '5 min away' : 
+                     rideStatus === 'ARRIVING' ? 'At pickup' : 
+                     'On ride - ' + (rideTimer || '0:00')}</p>
+              <p>🚗 Vehicle: {currentRide?.vehicleType || 'Mini'} ({currentRide?.vehicleNumber || 'RJ14 XX 1234'})</p>
             </div>
           </div>
+          
           <div style={styles.tripDetails}>
-            <p>📍 Pickup: {pickupLocation?.address || 'Pickup location'}</p>
-            <p>🏁 Drop: {dropLocation?.address || 'Drop location'}</p>
-            <p>💰 Fare: ₹{fare}</p>
+            <p><strong>📍 Pickup:</strong> {pickupAddress || 'Pickup location'}</p>
+            <p><strong>🏁 Drop:</strong> {dropAddress || 'Drop location'}</p>
+            <p><strong>💰 Fare:</strong> ₹{fare}</p>
           </div>
         </div>
-        <button style={styles.trackBtn}>Track Driver</button>
+        
+        {/* Cancel button - only show if not started */}
+        {rideStatus !== 'STARTED' && (
+          <button onClick={cancelRide} style={styles.cancelBtn}>
+            Cancel Ride
+          </button>
+        )}
+        
+        {rideStatus === 'STARTED' && (
+          <>
+            <div style={styles.timerDisplay}>
+              ⏱️ Ride Duration: {rideTimer || '0:00'}
+            </div>
+            <button style={styles.trackBtn}>Track on Map</button>
+          </>
+        )}
       </div>
     );
   }
@@ -372,6 +585,19 @@ useEffect(() => {
           🔄 Manual Refresh
         </button>
       </div>
+
+      {showOtp && (
+        <div style={styles.otpOverlay}>
+          <div style={styles.otpContainer}>
+            <h3>🔑 Your Ride OTP</h3>
+            <div style={styles.otpDisplay}>{otp}</div>
+            <p>Show this OTP to your driver to start the ride</p>
+            <button onClick={() => setShowOtp(false)} style={styles.gotItBtn}>
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -546,7 +772,6 @@ const styles = {
     borderRadius: '5px',
     cursor: 'pointer'
   },
-  // New styles for ride features
   searchingContainer: {
     display: 'flex',
     flexDirection: 'column',
@@ -604,10 +829,112 @@ const styles = {
     fontWeight: 'bold',
     cursor: 'pointer',
     marginTop: '20px'
+  },
+  otpOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    background: 'rgba(0,0,0,0.5)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2000,
+    backdropFilter: 'blur(5px)'
+  },
+  otpContainer: {
+    background: 'white',
+    padding: '30px',
+    borderRadius: '15px',
+    boxShadow: '0 10px 40px rgba(0,0,0,0.3)',
+    textAlign: 'center',
+    width: '80%',
+    maxWidth: '350px'
+  },
+  otpDisplay: {
+    fontSize: '48px',
+    fontWeight: 'bold',
+    letterSpacing: '10px',
+    color: '#4CAF50',
+    padding: '20px',
+    background: '#f5f5f5',
+    borderRadius: '10px',
+    margin: '20px 0'
+  },
+  gotItBtn: {
+    padding: '12px 30px',
+    background: '#4CAF50',
+    color: 'white',
+    border: 'none',
+    borderRadius: '25px',
+    fontSize: '16px',
+    cursor: 'pointer',
+    fontWeight: 'bold'
+  },
+  liveLocationCard: {
+    background: '#e3f2fd',
+    padding: '15px',
+    borderRadius: '10px',
+    marginBottom: '15px',
+    border: '1px solid #2196F3'
+  },
+  movingCar: {
+    fontSize: '2rem',
+    animation: 'moveCar 2s infinite',
+    textAlign: 'center'
+  },
+  timerDisplay: {
+    textAlign: 'center',
+    fontSize: '1.5rem',
+    fontWeight: 'bold',
+    color: '#4CAF50',
+    padding: '10px',
+    background: '#e8f5e8',
+    borderRadius: '8px',
+    margin: '10px 0'
+  },
+  locationRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    fontSize: '1.1rem'
+  },
+  locationText: {
+    fontWeight: 'bold',
+    color: '#2196F3'
+  },
+  locationTime: {
+    fontSize: '0.7rem',
+    color: '#999',
+    marginTop: '5px'
+  },
+  locationLoader: {
+    width: '30px',
+    height: '30px',
+    border: '3px solid #f3f3f3',
+    borderTop: '3px solid #2196F3',
+    borderRadius: '50%',
+    animation: 'spin 1s linear infinite',
+    margin: '10px auto'
+  },
+  locationDebug: {
+    fontSize: '0.65rem',
+    color: '#999',
+    marginTop: '5px',
+    fontFamily: 'monospace'
+  },
+  debugBtn: {
+    marginTop: '5px',
+    padding: '3px 10px',
+    background: '#f0f0f0',
+    border: '1px solid #ccc',
+    borderRadius: '3px',
+    cursor: 'pointer',
+    fontSize: '0.7rem'
   }
 };
 
-// Add animations
 const style = document.createElement('style');
 style.textContent = `
   @keyframes pulse {
@@ -628,6 +955,11 @@ style.textContent = `
       opacity: 1;
       transform: translateY(0);
     }
+  }
+  @keyframes moveCar {
+    0% { transform: translateX(0); }
+    50% { transform: translateX(10px); }
+    100% { transform: translateX(0); }
   }
 `;
 document.head.appendChild(style);

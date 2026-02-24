@@ -8,6 +8,7 @@ function App() {
   const [location, setLocation] = useState(null);
   const [socket, setSocket] = useState(null);
   const [loading, setLoading] = useState(false);
+  
   const [form, setForm] = useState({
     name: '',
     phone: '',
@@ -18,7 +19,13 @@ function App() {
   // Ride requests states
   const [rideRequests, setRideRequests] = useState([]);
   const [currentRide, setCurrentRide] = useState(null);
-  
+  const [rideStatus, setRideStatus] = useState(null);
+const [rideOtp, setRideOtp] = useState(null);
+const [showOtpInput, setShowOtpInput] = useState(false);
+const [enteredOtp, setEnteredOtp] = useState('');
+  const [activeRide, setActiveRide] = useState(null);
+const [rideStartTime, setRideStartTime] = useState(null);
+const [rideTimer, setRideTimer] = useState(null);
   const processedRideIds = useRef(new Set());
 
   // Load saved driver on startup
@@ -35,6 +42,21 @@ function App() {
       }
     }
   }, []);
+
+  useEffect(() => {
+  let interval;
+  if (rideStatus === 'STARTED' && rideStartTime) {
+    interval = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - rideStartTime) / 1000);
+      const minutes = Math.floor(elapsed / 60);
+      const seconds = elapsed % 60;
+      setRideTimer(`${minutes}:${seconds.toString().padStart(2, '0')}`);
+    }, 1000);
+  }
+  return () => clearInterval(interval);
+}, [rideStatus, rideStartTime]);
+
+
 
   // Setup socket and location tracking when driver is logged in
   useEffect(() => {
@@ -68,38 +90,66 @@ function App() {
       console.error('❌ Socket connection error:', err);
     });
 
-    // Remove existing listeners
-    newSocket.off('new-ride-request');
+    newSocket.on('ride-status-updated', (data) => {
+    console.log("🔄 Ride status updated:", data);
+    setCurrentRide(data.ride);
+    setRideStatus(data.status);
+    
+    if (data.status === 'STARTED') {
+      setRideStartTime(Date.now());
+    } else if (data.status === 'COMPLETED') {
+      setRideStartTime(null);
+      setRideTimer(null);
+    }
+    
+    // Show different messages
+    if (data.status === 'ACCEPTED') {
+      alert('✅ Ride accepted! Head to pickup location.');
+    } else if (data.status === 'ARRIVING') {
+      alert('🚗 You have arrived at pickup location');
+    } else if (data.status === 'STARTED') {
+      alert('🎉 Ride started! Safe journey!');
+    } else if (data.status === 'COMPLETED') {
+      alert('💰 Ride completed! Payment received.');
+      setCurrentRide(null);
+      setRideStatus(null);
+    }
+  });
+
+     // Remove existing listeners
+  newSocket.off('new-ride-request');
+  
     
     // Listen for new ride requests
-    newSocket.on('new-ride-request', (rideData) => {
-      console.log("🚗 New ride request received:", rideData);
+   
+       newSocket.on('new-ride-request', (rideData) => {
+    console.log("🚗 New ride request received:", rideData);
+    
+    const uniqueId = rideData.rideId || 
+                    `${rideData.pickup?.lat}_${rideData.pickup?.lng}_${rideData.fare}`;
+    
+    if (processedRideIds.current.has(uniqueId)) {
+      console.log("⚠️ Duplicate ride ignored:", uniqueId);
+      return;
+    }
+    
+    processedRideIds.current.add(uniqueId);
+    
+    setRideRequests(prev => {
+      const exists = prev.some(r => 
+        r.rideId === rideData.rideId ||
+        (r.pickup?.lat === rideData.pickup?.lat && 
+         r.drop?.lat === rideData.drop?.lat &&
+         Math.abs(r.fare - rideData.fare) < 1)
+      );
       
-      const uniqueId = rideData.rideId || 
-                      `${rideData.pickup?.lat}_${rideData.pickup?.lng}_${rideData.fare}`;
-      
-      if (processedRideIds.current.has(uniqueId)) {
-        console.log("⚠️ Duplicate ride ignored:", uniqueId);
-        return;
+      if (!exists) {
+        console.log("✅ Adding new ride request:", rideData);
+        return [...prev, { ...rideData, receivedAt: Date.now() }];
       }
-      
-      processedRideIds.current.add(uniqueId);
-      
-      setRideRequests(prev => {
-        const exists = prev.some(r => 
-          r.rideId === rideData.rideId ||
-          (r.pickup?.lat === rideData.pickup?.lat && 
-           r.drop?.lat === rideData.drop?.lat &&
-           Math.abs(r.fare - rideData.fare) < 1)
-        );
-        
-        if (!exists) {
-          console.log("✅ Adding new ride request:", rideData);
-          return [...prev, { ...rideData, receivedAt: Date.now() }];
-        }
-        return prev;
-      });
+      return prev;
     });
+  });
 
     // Listen for ride status updates
     newSocket.off('ride-updated');
@@ -109,63 +159,77 @@ function App() {
         setCurrentRide(null);
       }
     });
+  
+
+ newSocket.on('ride-otp', (data) => {
+    console.log("🔑 Ride OTP received:", data);
+    setRideOtp(data.otp);
+    setShowOtpInput(true);
+  });
 
     // Start watching location
-    if (navigator.geolocation) {
-      const watchId = navigator.geolocation.watchPosition(
-        (position) => {
-          const { latitude, longitude } = position.coords;
-          const newLocation = { lat: latitude, lng: longitude };
-          setLocation(newLocation);
-          console.log("📍 Location updated:", newLocation);
-          
-          // If online, update location via socket and API
-          if (isAvailable && newSocket.connected) {
-            // Update via socket for real-time
-            newSocket.emit('driver-location-update', {
-              driverId: driver._id,
-              lat: latitude,
-              lng: longitude
-            });
-            
-            // Also update via API to ensure DB is updated
-            axios.post('http://localhost:5000/api/driver/update-location', {
-              driverId: driver._id,
-              lat: latitude,
-              lng: longitude,
-              isAvailable: true
-            }).catch(err => console.log("Location update error:", err));
-          }
-        },
-        (error) => {
-          console.error('❌ Geolocation error:', error);
-          alert('Please enable location access for the app');
-        },
-        { 
-          enableHighAccuracy: true,
-          maximumAge: 0,
-          timeout: 5000
-        }
-      );
-
-      return () => {
-        navigator.geolocation.clearWatch(watchId);
-        newSocket.off('new-ride-request');
-        newSocket.off('ride-updated');
-        newSocket.close();
-        processedRideIds.current.clear();
-      };
-    } else {
-      alert('Geolocation is not supported by your browser');
+  
+ if (navigator.geolocation) {
+  const watchId = navigator.geolocation.watchPosition(
+    (position) => {
+      const { latitude, longitude } = position.coords;
+      const newLocation = { lat: latitude, lng: longitude };
+      setLocation(newLocation);
+      console.log("📍 Location updated:", newLocation);
       
-      return () => {
-        newSocket.off('new-ride-request');
-        newSocket.off('ride-updated');
-        newSocket.close();
-        processedRideIds.current.clear();
-      };
+      // ✅ IMPORTANT: If online and ride active, emit location
+      if (isAvailable && newSocket.connected) {
+        console.log("📤 Emitting location to server:", newLocation);
+        
+        // Update via socket for real-time
+        newSocket.emit('driver-location-update', {
+          driverId: driver._id,
+          lat: latitude,
+          lng: longitude
+        });
+        
+        // Also update via API
+        axios.post('http://localhost:5000/api/driver/update-location', {
+          driverId: driver._id,
+          lat: latitude,
+          lng: longitude,
+          isAvailable: true
+        }).then(res => {
+          console.log("✅ Location updated in DB");
+        }).catch(err => console.log("Location update error:", err));
+      } else {
+        console.log("⏸️ Not emitting - isAvailable:", isAvailable, "socket connected:", newSocket?.connected);
+      }
+    },
+    (error) => {
+      console.error('❌ Geolocation error:', error);
+      alert('Please enable location access for the app');
+    },
+    { 
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 5000
     }
-  }, [driver, isAvailable]);
+  );
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+      newSocket.off('new-ride-request');
+      newSocket.off('ride-updated');
+      newSocket.close();
+      processedRideIds.current.clear();
+    };
+  } else {
+    alert('Geolocation is not supported by your browser');
+    
+    return () => {
+      newSocket.off('new-ride-request');
+      newSocket.off('ride-updated');
+      newSocket.close();
+      processedRideIds.current.clear();
+    };
+  }
+}, [driver, isAvailable]);
 
   const handleRegister = async () => {
     if (!form.name || !form.phone || !form.vehicleNumber) {
@@ -289,6 +353,71 @@ function App() {
       console.error("Error rejecting ride:", error);
     }
   };
+
+  const updateRideStatus = async (newStatus) => {
+  if (!currentRide) return;
+  
+  try {
+    const res = await axios.post('http://localhost:5000/api/rides/update-status', {
+      rideId: currentRide._id,
+      status: newStatus,
+      location: location
+    });
+    
+    if (res.data.success) {
+      console.log(`✅ Ride status updated to ${newStatus}`);
+    }
+  } catch (error) {
+    console.error("Error updating ride status:", error);
+  }
+};
+
+// Generate OTP when arrived
+const handleArrived = async () => {
+  await updateRideStatus('ARRIVING');
+  // Generate OTP for ride start
+  try {
+    const res = await axios.post('http://localhost:5000/api/rides/generate-otp', {
+      rideId: currentRide._id
+    });
+    console.log("OTP generated:", res.data);
+  } catch (error) {
+    console.error("Error generating OTP:", error);
+  }
+};
+
+
+// Verify OTP to start ride
+const verifyOtpAndStart = async () => {
+  try {
+    const res = await axios.post('http://localhost:5000/api/rides/verify-otp', {
+      rideId: currentRide._id,
+      otp: enteredOtp
+    });
+    
+    if (res.data.success) {
+      setShowOtpInput(false);
+      setEnteredOtp('');
+      alert('✅ Ride started!');
+    }
+  } catch (error) {
+    alert('❌ Invalid OTP');
+  }
+};
+// Start ride button (after OTP verification)
+const handleStartRide = async () => {
+  setShowOtpInput(false);
+  setEnteredOtp('');
+  setRideStartTime(Date.now());
+  alert('✅ Ride started!');
+};
+
+// Complete ride
+const completeRide = async () => {
+  await updateRideStatus('COMPLETED');
+  setCurrentRide(null);
+  setRideStatus(null);
+};
 
   const handleLogout = () => {
     if (isAvailable) {
@@ -432,14 +561,59 @@ function App() {
         </div>
       )}
 
-      {/* Current Ride Section */}
-      {currentRide && (
-        <div style={styles.currentRideCard}>
-          <h3>🟢 Current Ride</h3>
-          <p>Ride in progress...</p>
-          <button style={styles.completeBtn}>Complete Ride</button>
+     {currentRide && (
+  <div style={styles.currentRideCard}>
+    <h3>🟢 Current Ride - {rideStatus}</h3>
+    <p>Ride ID: {currentRide._id}</p>
+    <p>📍 Pickup: {currentRide.pickupLocation?.address || 'Pickup'}</p>
+    <p>🏁 Drop: {currentRide.dropLocation?.address || 'Drop'}</p>
+    
+    {rideStatus === 'ACCEPTED' && (
+      <button onClick={() => updateRideStatus('ARRIVING')} style={styles.arrivingBtn}>
+        🚗 I've Arrived at Pickup
+      </button>
+    )}
+    
+    {rideStatus === 'ARRIVING' && (
+      <>
+        <button onClick={handleArrived} style={styles.arrivingBtn}>
+          🔑 Generate OTP
+        </button>
+        <button onClick={() => setShowOtpInput(true)} style={styles.otpBtn}>
+          Enter OTP to Start
+        </button>
+      </>
+    )}
+    
+    {showOtpInput && (
+      <div style={styles.otpContainer}>
+        <input
+          type="text"
+          placeholder="Enter 6-digit OTP"
+          value={enteredOtp}
+          onChange={(e) => setEnteredOtp(e.target.value)}
+          maxLength="6"
+          style={styles.otpInput}
+        />
+        <button onClick={verifyOtpAndStart} style={styles.verifyBtn}>
+          Verify & Start Ride
+        </button>
+      </div>
+    )}
+    
+    {rideStatus === 'STARTED' && (
+      <>
+        <div style={styles.timerDisplay}>
+          ⏱️ Ride Time: {rideTimer || '0:00'}
         </div>
-      )}
+        <button onClick={completeRide} style={styles.completeBtn}>
+          ✅ End Ride & Complete
+        </button>
+      </>
+    )}
+  </div>
+)}
+
 
       {/* Vehicle Info */}
       <div style={styles.infoCard}>
@@ -727,7 +901,68 @@ const styles = {
     borderRadius: '5px',
     cursor: 'pointer',
     fontSize: '0.9rem'
-  }
+  },
+   arrivingBtn: {
+    width: '100%',
+    padding: '12px',
+    background: '#FF9800',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    marginTop: '10px',
+    cursor: 'pointer',
+    fontWeight: 'bold'
+  },
+  otpBtn: {
+    width: '100%',
+    padding: '12px',
+    background: '#2196F3',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    marginTop: '10px',
+    cursor: 'pointer',
+    fontWeight: 'bold'
+  },
+  otpContainer: {
+    marginTop: '15px',
+    padding: '10px',
+    background: '#f5f5f5',
+    borderRadius: '8px'
+  },
+  otpInput: {
+    width: '100%',
+    padding: '12px',
+    fontSize: '20px',
+    textAlign: 'center',
+    letterSpacing: '8px',
+    border: '2px solid #ddd',
+    borderRadius: '8px',
+    marginBottom: '10px',
+    boxSizing: 'border-box'
+  },
+  verifyBtn: {
+    width: '100%',
+    padding: '12px',
+    background: '#4CAF50',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    fontWeight: 'bold'
+  },
+  timerDisplay: {
+  textAlign: 'center',
+  fontSize: '1.5rem',
+  fontWeight: 'bold',
+  color: '#4CAF50',
+  padding: '10px',
+  background: '#e8f5e8',
+  borderRadius: '8px',
+  margin: '10px 0'
+}
+
+
 };
 
 export default App;
