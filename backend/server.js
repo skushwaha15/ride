@@ -19,9 +19,9 @@ app.use(cors());
 app.use(express.json());
 
 // MongoDB connection
-mongoose.connect('mongodb+srv://sejalkushwaha342_db_user:Sej451981%40@ride-cluster.1fyknnh.mongodb.net/cab_booking?retryWrites=true&w=majority')
-.then(()=>console.log("MongoDB Atlas Connected"))
-.catch(err=>console.log(err));
+require('dotenv').config();
+
+mongoose.connect(process.env.MONGO_URI)
 
 // ==================== SCHEMAS ====================
 
