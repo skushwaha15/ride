@@ -239,21 +239,20 @@ function App() {
       return;
     }
 
-    setLoading(true);
-    try {
-      const newStatus = !isAvailable;
-      console.log("🚗 Toggling to:", newStatus ? "ONLINE" : "OFFLINE");
-      
-      axios.post(
-  'https://ride-backend-w2o0.onrender.com/api/driver/update-location',
-  {
-    driverId: driver._id,
-    lat: latitude,
-    lng: longitude,
-    isAvailable: true
-  }
-)
-      
+   setLoading(true);
+try {
+  const newStatus = !isAvailable;
+  console.log("🚗 Toggling to:", newStatus ? "ONLINE" : "OFFLINE");
+
+  const res = await axios.post(
+    'https://ride-backend-w2o0.onrender.com/api/driver/update-location',
+    {
+      driverId: driver._id,
+      lat: location.lat,
+      lng: location.lng,
+      isAvailable: newStatus
+    }
+  );
       if (res.data.success) {
         setIsAvailable(newStatus);
         
