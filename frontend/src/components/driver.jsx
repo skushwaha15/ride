@@ -1,7 +1,38 @@
 import React, { useState, useEffect } from 'react';
-import { FaUser, FaStar, FaClock, FaMapMarkerAlt } from "react-icons/fa";
+import { FaUser, FaStar, FaClock, FaMapMarkerAlt, FaPhone, FaComment } from "react-icons/fa";
+import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import axios from 'axios';
 import { io } from 'socket.io-client';
+
+// Fix for default markers
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+});
+
+// Custom car icon for driver
+const carIcon = new L.Icon({
+  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41]
+});
+
+// Custom pickup icon
+const pickupIcon = new L.Icon({
+  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41]
+});
 
 function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration }) {
   const [availableDrivers, setAvailableDrivers] = useState([]);
@@ -21,23 +52,31 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
   const [rideTimer, setRideTimer] = useState(null);
   const [pickupAddress, setPickupAddress] = useState('');
   const [dropAddress, setDropAddress] = useState('');
+  const [mapCenter, setMapCenter] = useState([20.5937, 78.9629]); // Default India
 
-  // ✅ FIX 1: Get address names with error handling
+  // Update map center when driver location changes
+  useEffect(() => {
+    if (driverLocation) {
+      setMapCenter([driverLocation.lat, driverLocation.lng]);
+    } else if (pickupLocation) {
+      setMapCenter([pickupLocation.lat, pickupLocation.lng]);
+    }
+  }, [driverLocation, pickupLocation]);
+
+  // Get address names with error handling
   useEffect(() => {
     const getAddress = async (lat, lng, setter) => {
       try {
         console.log(`📍 Getting address for: ${lat}, ${lng}`);
-        const res = await axios.get(`http://localhost:5000/api/geocode/reverse?lat=${lat}&lng=${lng}`);
+        const res = await axios.get(`https://ride-backend-w2o0.onrender.com/api/geocode/reverse?lat=${lat}&lng=${lng}`);
         if (res.data.success) {
           setter(res.data.shortAddress || res.data.address);
           console.log("✅ Address received:", res.data.shortAddress);
         } else {
-          // Fallback to coordinates
           setter(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
         }
       } catch (error) {
         console.error("❌ Error getting address:", error.message);
-        // Fallback to coordinates on error
         setter(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
       }
     };
@@ -55,7 +94,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     }
   }, [pickupLocation, dropLocation]);
 
-  // ✅ FIX 2: Listen for driver location updates with retry
+  // Listen for driver location updates
   useEffect(() => {
     if (!socket) {
       console.log("❌ Socket not available");
@@ -63,8 +102,6 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     }
     
     console.log("📍 Setting up location listener, socket connected:", socket.connected);
-    console.log("📍 Current ride status:", rideStatus);
-    console.log("📍 Assigned driver:", assignedDriver);
     
     const handleDriverLocation = (data) => {
       console.log("📍 Driver location received:", data);
@@ -73,7 +110,6 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     
     socket.on('driver-location', handleDriverLocation);
     
-    // Request location after 3 seconds if not received
     const timeout = setTimeout(() => {
       if (!driverLocation && currentRide) {
         console.log("⚠️ No location received, requesting...");
@@ -85,9 +121,9 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
       socket.off('driver-location', handleDriverLocation);
       clearTimeout(timeout);
     };
-  }, [socket, currentRide, rideStatus, assignedDriver]);
+  }, [socket, currentRide]);
 
-  // ✅ FIX 3: Timer for started ride
+  // Timer for started ride
   useEffect(() => {
     let interval;
     if (rideStatus === 'STARTED' && rideStartTime) {
@@ -101,7 +137,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     return () => clearInterval(interval);
   }, [rideStatus, rideStartTime]);
 
-  // ✅ FIX 4: Socket listeners for ride updates
+  // Socket listeners for ride updates
   useEffect(() => {
     if (!socket) return;
 
@@ -175,7 +211,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     setSearchingForDriver(true);
     
     try {
-      const res = await axios.post('http://localhost:5000/api/rides/request', {
+      const res = await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/request', {
         userId: localStorage.getItem('userId') || 'user_' + Date.now(),
         pickupLocation: {
           lat: pickupLocation.lat,
@@ -213,7 +249,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     if (!currentRide) return;
     
     try {
-      await axios.post('http://localhost:5000/api/rides/update-status', {
+      await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/update-status', {
         rideId: currentRide._id,
         status: 'CANCELLED'
       });
@@ -229,7 +265,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
 
   // Socket connection effect
   useEffect(() => {
-    const newSocket = io('http://localhost:5000', {
+    const newSocket = io('https://ride-backend-w2o0.onrender.com', {
       transports: ['websocket'],
       reconnection: true
     });
@@ -237,12 +273,14 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
 
     newSocket.on('connect', () => {
       console.log('✅ Connected to server');
+      
+      const userId = localStorage.getItem('userId') || 'user_' + Date.now();
+      newSocket.emit('register-user', userId);
+      localStorage.setItem('userId', userId);
     });
 
-    // Load drivers immediately
     loadAvailableDrivers();
 
-    // Listen for new drivers
     newSocket.on('driver-available', (data) => {
       console.log("📢 New driver available:", data);
       
@@ -267,7 +305,6 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
       });
     });
 
-    // Listen for drivers going offline
     newSocket.on('driver-unavailable', (data) => {
       console.log("📢 Driver offline:", data);
       setAvailableDrivers(prev => 
@@ -295,7 +332,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
       
       console.log("🔍 Loading available drivers...");
       
-      const res = await axios.get('http://localhost:5000/api/drivers/available', {
+      const res = await axios.get('https://ride-backend-w2o0.onrender.com/api/drivers/available', {
         params: {
           ...(pickupLocation && {
             lat: pickupLocation.lat,
@@ -388,43 +425,50 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
           {rideStatus === 'STARTED' && 'Enjoy your journey!'}
         </p>
         
-        {/* Live Location Card with Debug */}
-        <div style={styles.liveLocationCard}>
-          <h4>📍 Live Location</h4>
-          {driverLocation ? (
-            <div>
-              <div style={styles.locationRow}>
-                <span style={styles.movingCar}>🚗</span>
-                <span style={styles.locationText}>
+        {/* LIVE MAP */}
+        <div style={styles.mapContainer}>
+          <MapContainer
+            center={mapCenter}
+            zoom={15}
+            style={{ height: '250px', width: '100%', borderRadius: '10px' }}
+          >
+            <TileLayer
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+            />
+            
+            {/* Driver Location Marker */}
+            {driverLocation && (
+              <Marker 
+                position={[driverLocation.lat, driverLocation.lng]} 
+                icon={carIcon}
+              >
+                <Popup>
+                  <b>Driver Location</b><br/>
                   {driverLocation.lat.toFixed(4)}, {driverLocation.lng.toFixed(4)}
-                </span>
-              </div>
-              <p style={styles.locationTime}>
-                Last updated: {new Date().toLocaleTimeString()}
-              </p>
-            </div>
-          ) : (
-            <div>
-              <p>Waiting for driver location...</p>
-              <div style={styles.locationLoader}></div>
-              <p style={styles.locationDebug}>
-                Socket: {socket?.connected ? '✅' : '❌'}<br/>
-                Status: {rideStatus}<br/>
-                Driver: {assignedDriver?.slice(-6) || 'none'}<br/>
-                <button 
-                  onClick={() => {
-                    console.log("🔄 Manual location request");
-                    if (currentRide) {
-                      socket?.emit('request-driver-location', { rideId: currentRide._id });
-                    }
-                  }}
-                  style={styles.debugBtn}
-                >
-                  🔄 Request Location
-                </button>
-              </p>
-            </div>
-          )}
+                </Popup>
+              </Marker>
+            )}
+            
+            {/* Pickup Location Marker */}
+            {pickupLocation && (
+              <Marker 
+                position={[pickupLocation.lat, pickupLocation.lng]} 
+                icon={pickupIcon}
+              >
+                <Popup>
+                  <b>Pickup Location</b><br/>
+                  {pickupAddress || 'Pickup point'}
+                </Popup>
+              </Marker>
+            )}
+          </MapContainer>
+          
+          {/* Live Status Badge */}
+          <div style={styles.liveStatusBadge}>
+            <span style={styles.liveDot}></span>
+            LIVE
+          </div>
         </div>
         
         <div style={styles.driverInfo}>
@@ -446,20 +490,39 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
           </div>
         </div>
         
+        {/* RIDE IN PROGRESS SCREEN - When ride started */}
+        {rideStatus === 'STARTED' && (
+          <div style={styles.rideProgressCard}>
+            <div style={styles.progressHeader}>
+              <span style={styles.progressIcon}>🚗</span>
+              <span style={styles.progressText}>Ride in Progress</span>
+            </div>
+            
+            <div style={styles.timerDisplay}>
+              ⏱️ Duration: {rideTimer || '0:00'}
+            </div>
+            
+            <div style={styles.driverContact}>
+              <button style={styles.contactBtn}>
+                <FaPhone style={{marginRight: '5px'}} /> Call Driver
+              </button>
+              <button style={styles.contactBtn}>
+                <FaComment style={{marginRight: '5px'}} /> Message
+              </button>
+            </div>
+            
+            <p style={styles.helpText}>
+              Your driver is taking you to your destination. 
+              You can contact them if needed.
+            </p>
+          </div>
+        )}
+        
         {/* Cancel button - only show if not started */}
         {rideStatus !== 'STARTED' && (
           <button onClick={cancelRide} style={styles.cancelBtn}>
             Cancel Ride
           </button>
-        )}
-        
-        {rideStatus === 'STARTED' && (
-          <>
-            <div style={styles.timerDisplay}>
-              ⏱️ Ride Duration: {rideTimer || '0:00'}
-            </div>
-            <button style={styles.trackBtn}>Track on Map</button>
-          </>
         )}
       </div>
     );
@@ -932,6 +995,87 @@ const styles = {
     borderRadius: '3px',
     cursor: 'pointer',
     fontSize: '0.7rem'
+  },
+  // New map styles
+  mapContainer: {
+    position: 'relative',
+    marginBottom: '15px',
+    borderRadius: '10px',
+    overflow: 'hidden',
+    boxShadow: '0 4px 10px rgba(0,0,0,0.1)'
+  },
+  liveStatusBadge: {
+    position: 'absolute',
+    top: '10px',
+    right: '10px',
+    background: 'rgba(255, 68, 68, 0.9)',
+    color: 'white',
+    padding: '4px 10px',
+    borderRadius: '20px',
+    fontSize: '0.8rem',
+    fontWeight: 'bold',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '5px',
+    zIndex: 1000
+  },
+  liveDot: {
+    width: '8px',
+    height: '8px',
+    background: 'white',
+    borderRadius: '50%',
+    animation: 'pulse 1.5s infinite'
+  },
+
+ rideProgressCard: {
+    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+    color: 'white',
+    padding: '20px',
+    borderRadius: '15px',
+    marginTop: '20px',
+    textAlign: 'center',
+    boxShadow: '0 10px 30px rgba(102, 126, 234, 0.3)'
+  },
+  progressHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '10px',
+    marginBottom: '15px'
+  },
+  progressIcon: {
+    fontSize: '2rem'
+  },
+  progressText: {
+    fontSize: '1.3rem',
+    fontWeight: 'bold'
+  },
+  driverContact: {
+    display: 'flex',
+    gap: '10px',
+    marginTop: '20px',
+    marginBottom: '15px'
+  },
+  contactBtn: {
+    flex: 1,
+    padding: '12px',
+    background: 'rgba(255,255,255,0.2)',
+    border: '1px solid rgba(255,255,255,0.3)',
+    borderRadius: '10px',
+    color: 'white',
+    fontSize: '1rem',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+    backdropFilter: 'blur(5px)',
+    transition: 'all 0.3s',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  helpText: {
+    fontSize: '0.9rem',
+    opacity: 0.9,
+    marginTop: '10px'
   }
 };
 
@@ -965,3 +1109,5 @@ style.textContent = `
 document.head.appendChild(style);
 
 export default Driver;
+
+

@@ -29,7 +29,7 @@ function Book({ fare, vehicle, driver, pickupLocation, dropLocation, distance, d
         fare
       });
 
-      const res = await axios.post('http://localhost:5000/api/rides/request', {
+      const res = await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/request', {
         userId: 'user_' + Date.now(),
         driverId: driver?._id,
         pickupLocation: {
