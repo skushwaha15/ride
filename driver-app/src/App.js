@@ -207,7 +207,10 @@ function App() {
     setLoading(true);
     try {
       console.log("📝 Registering with:", form);
-      const res = await axios.post(axios.post('https://ride-backend-w2o0.onrender.com/api/driver/register', form), form);
+    const res = await axios.post(
+  'https://ride-backend-w2o0.onrender.com/api/driver/register',
+  form
+);
       console.log("📦 Register response:", res.data);
       
       if (res.data.success) {
@@ -241,12 +244,15 @@ function App() {
       const newStatus = !isAvailable;
       console.log("🚗 Toggling to:", newStatus ? "ONLINE" : "OFFLINE");
       
-      const res = await axios.post('https://ride-backend-w2o0.onrender.com/api/driver/update-location', {
-        driverId: driver._id,
-        lat: location.lat,
-        lng: location.lng,
-        isAvailable: newStatus
-      });
+      axios.post(
+  'https://ride-backend-w2o0.onrender.com/api/driver/update-location',
+  {
+    driverId: driver._id,
+    lat: latitude,
+    lng: longitude,
+    isAvailable: true
+  }
+)
       
       if (res.data.success) {
         setIsAvailable(newStatus);
