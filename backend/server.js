@@ -28,9 +28,24 @@ const allowedOrigins = [
   'http://localhost:3001',
   'http://127.0.0.1:3000',
   'http://127.0.0.1:3001',
+  'https://ride-wmqa.vercel.app',
   'https://ride-backend-w20.onrender.com',
-  process.env.FRONTEND_URL
+  ...(process.env.FRONTEND_URLS || process.env.FRONTEND_URL || '')
+    .split(',')
+    .map((origin) => origin.trim())
 ].filter(Boolean);
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`Origin ${origin} is not allowed by CORS`));
+  },
+  credentials: true
+};
 
 const io = socketIo(server, {
   cors: {
@@ -318,10 +333,7 @@ const sendEmailWithBrevo = ({ to, subject, htmlContent, textContent }) => {
 };
 
 // Middleware
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true
-}));
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // 📦 MongoDB Connection
