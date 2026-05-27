@@ -1,10 +1,23 @@
-import React, { useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { FaUser, FaStar, FaClock, FaMapMarkerAlt, FaPhone, FaComment } from "react-icons/fa";
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import axios from 'axios';
 import { io } from 'socket.io-client';
+import Payment from './payment'; // 👈 IMPORT PAYMENT COMPONENT
+
+// ==================== ENVIRONMENT CONFIG ====================
+const isLocalDevelopment = window.location.hostname === 'localhost' || 
+                          window.location.hostname === '127.0.0.1';
+
+const API_URL = isLocalDevelopment 
+  ? 'http://localhost:10000'
+  : 'https://ride-backend-w20.onrender.com';
+
+console.log(`🌐 User App - Environment: ${isLocalDevelopment ? 'LOCAL' : 'PRODUCTION'}`);
+console.log(`🌐 User App - API URL: ${API_URL}`);
+// ============================================================
 
 // Fix for default markers
 delete L.Icon.Default.prototype._getIconUrl;
@@ -35,6 +48,7 @@ const pickupIcon = new L.Icon({
 });
 
 function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration }) {
+  // ================ STATE DECLARATIONS ================
   const [availableDrivers, setAvailableDrivers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [socket, setSocket] = useState(null);
@@ -53,6 +67,13 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
   const [pickupAddress, setPickupAddress] = useState('');
   const [dropAddress, setDropAddress] = useState('');
   const [mapCenter, setMapCenter] = useState([20.5937, 78.9629]); // Default India
+  const [pickupEtas, setPickupEtas] = useState({});
+  const [livePickupEta, setLivePickupEta] = useState('Calculating pickup time');
+  
+  // 👇 PAYMENT STATES
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentDetails, setPaymentDetails] = useState(null);
+  const paymentRedirectStarted = useRef(false);
 
   // Update map center when driver location changes
   useEffect(() => {
@@ -68,7 +89,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     const getAddress = async (lat, lng, setter) => {
       try {
         console.log(`📍 Getting address for: ${lat}, ${lng}`);
-        const res = await axios.get(`https://ride-backend-w2o0.onrender.com/api/geocode/reverse?lat=${lat}&lng=${lng}`);
+        const res = await axios.get(`${API_URL}/api/geocode/reverse?lat=${lat}&lng=${lng}`);
         if (res.data.success) {
           setter(res.data.shortAddress || res.data.address);
           console.log("✅ Address received:", res.data.shortAddress);
@@ -116,7 +137,6 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
         socket.emit('request-driver-location', { rideId: currentRide._id });
       }
     }, 3000);
-    
     return () => {
       socket.off('driver-location', handleDriverLocation);
       clearTimeout(timeout);
@@ -144,7 +164,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     const handleRideAccepted = (data) => {
       console.log("✅ Ride accepted by driver:", data);
       setSearchingForDriver(false);
-      setRideStatus('accepted');
+      setRideStatus('ACCEPTED');
       setAssignedDriver(data.driverId);
     };
 
@@ -169,11 +189,33 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
         setRideStartTime(Date.now());
         alert('🎉 Your ride has started! Enjoy the journey.');
       } else if (data.status === 'COMPLETED') {
+        // ???? SHOW PAYMENT MODAL WHEN RIDE COMPLETES
         setRideStartTime(null);
         setRideTimer(null);
-        alert('💰 Ride completed! Thank you for riding with us.');
-        setRideStatus(null);
-        setCurrentRide(null);
+
+        if (data.ride.paymentTiming === 'PREPAID' && data.ride.paymentStatus === 'COMPLETED') {
+          alert('? Ride completed. Payment was already prepaid.');
+          setShowPaymentModal(false);
+          return;
+        }
+        
+        // Get payment method from localStorage (saved in Book.jsx)
+        const paymentMethod = data.ride.paymentMethod || localStorage.getItem('paymentMethod') || 'CASH';
+
+        if (data.ride.paymentTiming === 'POSTPAID' && paymentMethod === 'CARD' && data.ride.paymentStatus !== 'COMPLETED') {
+          startPostRideStripePayment(data.ride);
+          return;
+        }
+        
+        setPaymentDetails({
+          rideId: data.ride._id,
+          amount: data.ride.fare,
+          userId: localStorage.getItem('userId'),
+          driverId: data.ride.driverId,
+          paymentMethod: paymentMethod,
+          paymentTiming: data.ride.paymentTiming || 'POSTPAID'
+        });
+        setShowPaymentModal(true);
       } else if (data.status === 'CANCELLED') {
         alert('❌ Ride was cancelled');
         setRideStatus(null);
@@ -183,7 +225,12 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     };
 
     const handleRideOtp = (data) => {
-      console.log("🔑 Ride OTP received:", data);
+      console.log("🔑🔑🔑 RIDE OTP RECEIVED:", data);
+      const userId = localStorage.getItem('userId');
+      if (data.userId && userId && data.userId !== userId) {
+        return;
+      }
+
       setOtp(data.otp);
       setShowOtp(true);
     };
@@ -201,6 +248,45 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     };
   }, [socket]);
 
+  // Postpaid card payments use Stripe Checkout instead of the in-app payment modal.
+  const startPostRideStripePayment = async (ride) => {
+    if (paymentRedirectStarted.current || !ride?._id) return;
+
+    paymentRedirectStarted.current = true;
+
+    localStorage.setItem('pendingUserPostpaidRidePayment', JSON.stringify({
+      ride,
+      pickupLocation: pickupLocation || ride.pickupLocation,
+      dropLocation: dropLocation || ride.dropLocation
+    }));
+
+    try {
+      const paymentRes = await axios.post(`${API_URL}/api/payments/create-checkout-session`, {
+        rideId: ride._id,
+        amount: ride.fare,
+        userId: ride.userId || localStorage.getItem('userId'),
+        driverId: ride.driverId
+      });
+
+      if (!paymentRes.data.url) {
+        throw new Error('Stripe checkout URL was not returned');
+      }
+
+      window.location.assign(paymentRes.data.url);
+    } catch (error) {
+      paymentRedirectStarted.current = false;
+      localStorage.removeItem('pendingUserPostpaidRidePayment');
+      alert(error.response?.data?.error || error.message || 'Could not open Stripe payment.');
+    }
+  };
+
+  const handlePaymentComplete = (payment) => {
+    setShowPaymentModal(false);
+    setRideStatus(null);
+    setCurrentRide(null);
+    alert(`💰 Payment of ₹${payment?.amount || currentRide?.fare} successful! Thank you for riding with us.`);
+  };
+
   // Request ride function
   const requestRide = async () => {
     if (!pickupLocation || !dropLocation) {
@@ -211,8 +297,21 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     setSearchingForDriver(true);
     
     try {
-      const res = await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/request', {
-        userId: localStorage.getItem('userId') || 'user_' + Date.now(),
+      let userId = localStorage.getItem('userId');
+      
+      if (!userId) {
+        userId = 'user_' + Date.now();
+        localStorage.setItem('userId', userId);
+        console.log("🆕 Created new userId:", userId);
+      } else {
+        console.log("✅ Using existing userId:", userId);
+      }
+      
+      // Get payment method from localStorage (set in Book.jsx)
+      const paymentMethod = localStorage.getItem('paymentMethod') || 'CASH';
+      
+      const res = await axios.post(`${API_URL}/api/rides/request`, {
+        userId: userId,
         pickupLocation: {
           lat: pickupLocation.lat,
           lng: pickupLocation.lng,
@@ -225,10 +324,12 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
         },
         fare: fare,
         distance: distance,
-        duration: duration
+        duration: duration,
+        paymentMethod: paymentMethod // 👈 SEND PAYMENT METHOD
       });
       
-      console.log("✅ Ride requested:", res.data);
+      console.log("✅ Ride requested with userId:", userId);
+      console.log("✅ Ride response:", res.data);
       localStorage.setItem('currentRideId', res.data.ride._id);
       
     } catch (error) {
@@ -238,7 +339,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     }
   };
 
-  // Cancel ride search
+  // Cancel search function
   const cancelSearch = () => {
     setSearchingForDriver(false);
     setRideStatus(null);
@@ -249,7 +350,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     if (!currentRide) return;
     
     try {
-      await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/update-status', {
+      await axios.post(`${API_URL}/api/rides/update-status`, {
         rideId: currentRide._id,
         status: 'CANCELLED'
       });
@@ -265,18 +366,22 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
 
   // Socket connection effect
   useEffect(() => {
-    const newSocket = io('https://ride-backend-w2o0.onrender.com', {
+    const newSocket = io(API_URL, {
       transports: ['websocket'],
       reconnection: true
     });
     setSocket(newSocket);
 
     newSocket.on('connect', () => {
-      console.log('✅ Connected to server');
+      console.log('✅ Connected to server with ID:', newSocket.id);
       
-      const userId = localStorage.getItem('userId') || 'user_' + Date.now();
+      let userId = localStorage.getItem('userId');
+      if (!userId) {
+        userId = 'user_' + Date.now();
+        localStorage.setItem('userId', userId);
+      }
+      console.log("📝 Registering user with ID:", userId);
       newSocket.emit('register-user', userId);
-      localStorage.setItem('userId', userId);
     });
 
     loadAvailableDrivers();
@@ -312,6 +417,17 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
       );
     });
 
+    newSocket.on('driver-location-changed', (data) => {
+      const driverId = data.driverId || data._id;
+      setAvailableDrivers(prev => prev.map(driver => {
+        if (driver._id !== driverId && driver.id !== driverId) return driver;
+        return {
+          ...driver,
+          currentLocation: data.location
+        };
+      }));
+    });
+
     return () => {
       newSocket.close();
     };
@@ -332,7 +448,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
       
       console.log("🔍 Loading available drivers...");
       
-      const res = await axios.get('https://ride-backend-w2o0.onrender.com/api/drivers/available', {
+      const res = await axios.get(`${API_URL}/api/drivers/available`, {
         params: {
           ...(pickupLocation && {
             lat: pickupLocation.lat,
@@ -360,20 +476,132 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
     }
   };
 
-  // Calculate distance (mock for now)
-  const getDriverDistance = () => {
-    return Math.floor(Math.random() * 5) + 1;
+  const calculateDistanceKm = (from, to) => {
+    if (!from?.lat || !from?.lng || !to?.lat || !to?.lng) return null;
+    if (from.lat === 0 && from.lng === 0) return null;
+
+    const R = 6371;
+    const dLat = (to.lat - from.lat) * Math.PI / 180;
+    const dLng = (to.lng - from.lng) * Math.PI / 180;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(from.lat * Math.PI / 180) * Math.cos(to.lat * Math.PI / 180) *
+      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    return R * c;
   };
 
-  // Calculate fare
-  const getDriverFare = (driverType) => {
-    const multipliers = {
-      'Mini': 1,
-      'Sedan': 1.5,
-      'SUV': 2,
-      'Auto': 0.8
+  const getFallbackPickupEta = (driverLocation) => {
+    const distanceKm = calculateDistanceKm(driverLocation, pickupLocation);
+    if (!distanceKm) return 'Nearby';
+
+    const averageCitySpeedKmh = 25;
+    const minutes = Math.max(1, Math.round((distanceKm / averageCitySpeedKmh) * 60));
+    return `${minutes} min to pickup`;
+  };
+
+  const getRoadPickupEta = async (driverLocation) => {
+    if (!driverLocation?.lat || !driverLocation?.lng || !pickupLocation?.lat || !pickupLocation?.lng) {
+      return 'Pickup time unavailable';
+    }
+
+    try {
+      const url = `https://router.project-osrm.org/route/v1/driving/${driverLocation.lng},${driverLocation.lat};${pickupLocation.lng},${pickupLocation.lat}?overview=false`;
+      const response = await fetch(url);
+      const data = await response.json();
+      const seconds = data.routes?.[0]?.duration;
+
+      if (!response.ok || typeof seconds !== 'number') {
+        return getFallbackPickupEta(driverLocation);
+      }
+
+      const minutes = Math.max(1, Math.round(seconds / 60));
+      return `${minutes} min to pickup`;
+    } catch (error) {
+      return getFallbackPickupEta(driverLocation);
+    }
+  };
+
+  useEffect(() => {
+    if (!pickupLocation || availableDrivers.length === 0) return;
+
+    let cancelled = false;
+
+    const loadPickupEtas = async () => {
+      const entries = await Promise.all(
+        availableDrivers.map(async (driver) => [
+          driver._id,
+          await getRoadPickupEta(driver.currentLocation)
+        ])
+      );
+
+      if (!cancelled) {
+        setPickupEtas(Object.fromEntries(entries));
+      }
     };
-    return Math.round(fare * (multipliers[driverType] || 1));
+
+    loadPickupEtas();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [availableDrivers, pickupLocation]);
+
+  useEffect(() => {
+    if (!driverLocation || !pickupLocation) return;
+
+    let cancelled = false;
+
+    getRoadPickupEta(driverLocation).then((eta) => {
+      if (!cancelled) {
+        setLivePickupEta(eta);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [driverLocation, pickupLocation]);
+
+  const getDriverPickupEta = (driver) => {
+    return pickupEtas[driver._id] || getFallbackPickupEta(driver.currentLocation);
+  };
+
+  const formatTripDistance = () => {
+    return typeof distance === 'number' ? distance.toFixed(2) : 'Calculating';
+  };
+
+  const formatTripDuration = () => {
+    if (typeof duration !== 'number' || !Number.isFinite(duration)) {
+      return 'Calculating';
+    }
+
+    const roundedMinutes = Math.max(1, Math.ceil(duration));
+    if (roundedMinutes < 60) {
+      return `${roundedMinutes} min`;
+    }
+
+    const hours = Math.floor(roundedMinutes / 60);
+    const minutes = roundedMinutes % 60;
+    return minutes ? `${hours} hr ${minutes} min` : `${hours} hr`;
+  };
+
+  // Calculate fare using the same rate table as the backend.
+  const getDriverFare = (driverType) => {
+    const rates = {
+      Mini: { baseFare: 50, perKm: 10 },
+      Sedan: { baseFare: 80, perKm: 14 },
+      SUV: { baseFare: 120, perKm: 18 },
+      Auto: { baseFare: 40, perKm: 8 }
+    };
+    const rate = rates[driverType] || rates.Mini;
+
+    if (typeof distance !== 'number') {
+      return fare;
+    }
+
+    return Math.round(rate.baseFare + (rate.perKm * distance));
   };
 
   // Manual refresh
@@ -394,33 +622,45 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
           <p>📍 From: {pickupAddress || 'Pickup'}</p>
           <p>🏁 To: {dropAddress || 'Drop'}</p>
           <p>💰 Fare: ₹{fare}</p>
-          <p>📏 Distance: {distance} km</p>
+          <p>📏 Distance: {formatTripDistance()} km</p>
         </div>
         <button onClick={cancelSearch} style={styles.cancelBtn}>
           Cancel Search
         </button>
+
+        {/* Payment Modal */}
+        {showPaymentModal && paymentDetails && (
+          <Payment
+            isOpen={showPaymentModal}
+            onClose={() => setShowPaymentModal(false)}
+            amount={paymentDetails.amount}
+            rideDetails={paymentDetails}
+            onPaymentComplete={handlePaymentComplete}
+            userType="user"
+          />
+        )}
       </div>
     );
   }
 
   // Show driver assigned screen with live location
-  if (rideStatus === 'accepted' || rideStatus === 'ARRIVING' || rideStatus === 'STARTED') {
+  if (rideStatus === 'ACCEPTED' || rideStatus === 'ARRIVING' || rideStatus === 'STARTED') {
     return (
       <div style={styles.assignedContainer}>
         <div style={styles.successIcon}>
-          {rideStatus === 'accepted' && '✅'}
+          {rideStatus === 'ACCEPTED' && '✅'}
           {rideStatus === 'ARRIVING' && '🚗'}
           {rideStatus === 'STARTED' && '🎉'}
         </div>
         
         <h3>
-          {rideStatus === 'accepted' && 'Driver Assigned!'}
+          {rideStatus === 'ACCEPTED' && 'Driver Assigned!'}
           {rideStatus === 'ARRIVING' && 'Driver Arrived!'}
           {rideStatus === 'STARTED' && 'Ride In Progress!'}
         </h3>
         
         <p>
-          {rideStatus === 'accepted' && 'Your driver is on the way'}
+          {rideStatus === 'ACCEPTED' && 'Your driver is on the way'}
           {rideStatus === 'ARRIVING' && 'Driver is waiting at pickup location'}
           {rideStatus === 'STARTED' && 'Enjoy your journey!'}
         </p>
@@ -476,7 +716,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
             <FaUser size={40} />
             <div>
               <h4>Driver {assignedDriver?.slice(-6) || 'Unknown'}</h4>
-              <p>⚡ {rideStatus === 'accepted' ? '5 min away' : 
+              <p>⚡ {rideStatus === 'ACCEPTED' ? livePickupEta : 
                      rideStatus === 'ARRIVING' ? 'At pickup' : 
                      'On ride - ' + (rideTimer || '0:00')}</p>
               <p>🚗 Vehicle: {currentRide?.vehicleType || 'Mini'} ({currentRide?.vehicleNumber || 'RJ14 XX 1234'})</p>
@@ -499,7 +739,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
             </div>
             
             <div style={styles.timerDisplay}>
-              ⏱️ Duration: {rideTimer || '0:00'}
+              ⏱️ Elapsed: {rideTimer || '0:00'}
             </div>
             
             <div style={styles.driverContact}>
@@ -524,6 +764,18 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
             Cancel Ride
           </button>
         )}
+
+        {/* Payment Modal */}
+        {showPaymentModal && paymentDetails && (
+          <Payment
+            isOpen={showPaymentModal}
+            onClose={() => setShowPaymentModal(false)}
+            amount={paymentDetails.amount}
+            rideDetails={paymentDetails}
+            onPaymentComplete={handlePaymentComplete}
+            userType="user"
+          />
+        )}
       </div>
     );
   }
@@ -537,6 +789,18 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
         <button onClick={handleRefresh} style={styles.refreshBtn}>
           🔄 Refresh
         </button>
+
+        {/* Payment Modal */}
+        {showPaymentModal && paymentDetails && (
+          <Payment
+            isOpen={showPaymentModal}
+            onClose={() => setShowPaymentModal(false)}
+            amount={paymentDetails.amount}
+            rideDetails={paymentDetails}
+            onPaymentComplete={handlePaymentComplete}
+            userType="user"
+          />
+        )}
       </div>
     );
   }
@@ -551,6 +815,18 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
         <button style={styles.retryBtn} onClick={handleRefresh}>
           🔄 Try Again
         </button>
+
+        {/* Payment Modal */}
+        {showPaymentModal && paymentDetails && (
+          <Payment
+            isOpen={showPaymentModal}
+            onClose={() => setShowPaymentModal(false)}
+            amount={paymentDetails.amount}
+            rideDetails={paymentDetails}
+            onPaymentComplete={handlePaymentComplete}
+            userType="user"
+          />
+        )}
       </div>
     );
   }
@@ -576,6 +852,18 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
             🚖 Request Ride Anyway
           </button>
         )}
+
+        {/* Payment Modal */}
+        {showPaymentModal && paymentDetails && (
+          <Payment
+            isOpen={showPaymentModal}
+            onClose={() => setShowPaymentModal(false)}
+            amount={paymentDetails.amount}
+            rideDetails={paymentDetails}
+            onPaymentComplete={handlePaymentComplete}
+            userType="user"
+          />
+        )}
       </div>
     );
   }
@@ -584,7 +872,11 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
   return (
     <div style={styles.container}>
       <div style={styles.header}>
-        <h3>{availableDrivers.length} Driver{availableDrivers.length > 1 ? 's' : ''} Available</h3>
+        <div>
+          <h3>{availableDrivers.length} Driver{availableDrivers.length > 1 ? 's' : ''} Available</h3>
+          <p style={styles.tripDistanceText}>Trip distance: {formatTripDistance()} km</p>
+          <p style={styles.tripDistanceText}>Ride time: {formatTripDuration()}</p>
+        </div>
         <span style={styles.liveBadge}>🔴 LIVE</span>
       </div>
       
@@ -613,7 +905,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
               
               <div style={styles.driverInfo}>
                 <span style={styles.infoItem}>
-                  <FaMapMarkerAlt /> {getDriverDistance()} min away
+                  <FaMapMarkerAlt /> {getDriverPickupEta(driver)}
                 </span>
                 <span style={styles.infoItem}>
                   <FaClock /> {driver.vehicleNumber}
@@ -628,8 +920,10 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
                 <button 
                   style={styles.bookBtn}
                   onClick={() => {
-                    onBook(driver);
-                    requestRide();
+                    onBook({
+                      ...driver,
+                      selectedFare: getDriverFare(driver.vehicleType)
+                    });
                   }}
                 >
                   Book Now
@@ -649,6 +943,7 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
         </button>
       </div>
 
+      {/* OTP Modal */}
       {showOtp && (
         <div style={styles.otpOverlay}>
           <div style={styles.otpContainer}>
@@ -661,10 +956,23 @@ function Driver({ fare, onBook, pickupLocation, dropLocation, distance, duration
           </div>
         </div>
       )}
+
+      {/* Payment Modal */}
+      {showPaymentModal && paymentDetails && (
+        <Payment
+          isOpen={showPaymentModal}
+          onClose={() => setShowPaymentModal(false)}
+          amount={paymentDetails.amount}
+          rideDetails={paymentDetails}
+          onPaymentComplete={handlePaymentComplete}
+          userType="user"
+        />
+      )}
     </div>
   );
 }
 
+// Styles (same as before)
 const styles = {
   container: {
     height: '100%',
@@ -679,6 +987,11 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center'
+  },
+  tripDistanceText: {
+    margin: '4px 0 0',
+    color: '#666',
+    fontSize: '0.9rem'
   },
   liveBadge: {
     background: '#ff4444',
@@ -899,21 +1212,23 @@ const styles = {
     left: 0,
     right: 0,
     bottom: 0,
-    background: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 2000,
+    zIndex: 9999,
     backdropFilter: 'blur(5px)'
   },
   otpContainer: {
-    background: 'white',
+    backgroundColor: 'white',
     padding: '30px',
     borderRadius: '15px',
     boxShadow: '0 10px 40px rgba(0,0,0,0.3)',
     textAlign: 'center',
-    width: '80%',
-    maxWidth: '350px'
+    width: '90%',
+    maxWidth: '350px',
+    position: 'relative',
+    zIndex: 10000
   },
   otpDisplay: {
     fontSize: '48px',
@@ -996,7 +1311,6 @@ const styles = {
     cursor: 'pointer',
     fontSize: '0.7rem'
   },
-  // New map styles
   mapContainer: {
     position: 'relative',
     marginBottom: '15px',
@@ -1026,8 +1340,7 @@ const styles = {
     borderRadius: '50%',
     animation: 'pulse 1.5s infinite'
   },
-
- rideProgressCard: {
+  rideProgressCard: {
     background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
     color: 'white',
     padding: '20px',
@@ -1079,6 +1392,7 @@ const styles = {
   }
 };
 
+// Add keyframes
 const style = document.createElement('style');
 style.textContent = `
   @keyframes pulse {
@@ -1109,5 +1423,3 @@ style.textContent = `
 document.head.appendChild(style);
 
 export default Driver;
-
-

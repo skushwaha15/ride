@@ -1,18 +1,48 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
+import Payment from './payment';
+import RideChat from './RideChat';
+
+// ==================== ENVIRONMENT CONFIG ====================
+const isLocalDevelopment = window.location.hostname === 'localhost' || 
+                          window.location.hostname === '127.0.0.1';
+
+const API_URL = isLocalDevelopment 
+  ? 'http://localhost:10000'
+  : 'https://ride-backend-w20.onrender.com';
+const ACTIVE_RIDE_STATUSES = ['ACCEPTED', 'ARRIVING', 'STARTED'];
+
+console.log(`🌐 Environment: ${isLocalDevelopment ? 'LOCAL' : 'PRODUCTION'}`);
+console.log(`🌐 API URL: ${API_URL}`);
+// ============================================================
 
 function App() {
+  // ================ STATE DECLARATIONS ================
   const [driver, setDriver] = useState(null);
   const [isAvailable, setIsAvailable] = useState(false);
   const [location, setLocation] = useState(null);
   const [socket, setSocket] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [authMode, setAuthMode] = useState('login');
+  const [notice, setNotice] = useState({ type: 'info', message: '' });
   
+  // Payment states
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentDetails, setPaymentDetails] = useState(null);
+  
+  // Earnings states
+  const [earnings, setEarnings] = useState({ total: 0, today: 0, trips: 0 });
+  
+  // Form state
   const [form, setForm] = useState({
     name: '',
     phone: '',
     vehicleType: 'Mini',
+    vehicleNumber: ''
+  });
+  const [loginForm, setLoginForm] = useState({
+    phone: '',
     vehicleNumber: ''
   });
   
@@ -20,29 +50,157 @@ function App() {
   const [rideRequests, setRideRequests] = useState([]);
   const [currentRide, setCurrentRide] = useState(null);
   const [rideStatus, setRideStatus] = useState(null);
-  const [rideOtp, setRideOtp] = useState(null);
   const [showOtpInput, setShowOtpInput] = useState(false);
   const [enteredOtp, setEnteredOtp] = useState('');
-  const [activeRide, setActiveRide] = useState(null);
   const [rideStartTime, setRideStartTime] = useState(null);
   const [rideTimer, setRideTimer] = useState(null);
   
   const processedRideIds = useRef(new Set());
 
+  // ================ HELPER FUNCTIONS ================
+  const notify = (message, type = 'info') => {
+    setNotice({ message, type });
+  };
+
+  const clearActiveRide = () => {
+    localStorage.removeItem('driverCurrentRide');
+    localStorage.removeItem('driverRideStatus');
+    localStorage.removeItem('driverRideStartTime');
+    setCurrentRide(null);
+    setRideStatus(null);
+    setRideStartTime(null);
+    setRideTimer(null);
+  };
+
+  const saveActiveRide = (ride, status = ride?.status || 'ACCEPTED') => {
+    if (!ride) return;
+    if (!ACTIVE_RIDE_STATUSES.includes(status)) {
+      clearActiveRide();
+      return;
+    }
+
+    localStorage.setItem('driverCurrentRide', JSON.stringify(ride));
+    localStorage.setItem('driverRideStatus', status);
+    setCurrentRide(ride);
+    setRideStatus(status);
+  };
+
+  const showPaymentScreen = (ride) => {
+    setPaymentDetails({
+      rideId: ride._id,
+      amount: ride.fare,
+      userId: ride.userId,
+      driverId: driver._id,
+      paymentMethod: ride.paymentMethod || 'CASH',
+      paymentTiming: ride.paymentTiming || 'POSTPAID'
+    });
+    setShowPaymentModal(true);
+  };
+
+  const handlePaymentComplete = (payment) => {
+    setShowPaymentModal(false);
+    clearActiveRide();
+    notify(`Payment of ₹${payment?.amount || currentRide?.fare} received.`, 'success');
+    // Reload earnings after payment
+    loadEarnings();
+  };
+
+  // Load earnings function
+  const loadEarnings = async () => {
+    if (!driver) return;
+    try {
+      const res = await axios.get(`${API_URL}/api/payments/driver/${driver._id}`);
+      if (res.data.success) {
+        const todayPayments = res.data.payments.filter(p => 
+          new Date(p.completedAt).toDateString() === new Date().toDateString()
+        );
+        const todayEarnings = todayPayments.reduce((sum, p) => sum + p.amount, 0);
+        
+        setEarnings({
+          total: res.data.totalEarnings,
+          trips: res.data.totalTrips,
+          today: todayEarnings
+        });
+      }
+    } catch (error) {
+      console.error("Error loading earnings:", error);
+    }
+  };
+
+  // ================ useEffect HOOKS ================
+  
   // Load saved driver on startup
   useEffect(() => {
     const savedDriver = localStorage.getItem('driver');
     if (savedDriver) {
       try {
         const driverData = JSON.parse(savedDriver);
+        if (!driverData || !driverData._id) {
+          console.log("⚠️ Invalid driver data, clearing storage");
+          localStorage.removeItem('driver');
+          setDriver(null);
+          return;
+        }
         setDriver(driverData);
         setIsAvailable(driverData.isAvailable || false);
         console.log("✅ Loaded saved driver:", driverData);
+
+        const savedRide = localStorage.getItem('driverCurrentRide');
+        const savedRideStatus = localStorage.getItem('driverRideStatus');
+        const savedRideStartTime = localStorage.getItem('driverRideStartTime');
+        if (savedRide) {
+          const rideData = JSON.parse(savedRide);
+          const status = savedRideStatus || rideData.status || 'ACCEPTED';
+          if (ACTIVE_RIDE_STATUSES.includes(status)) {
+            setCurrentRide(rideData);
+            setRideStatus(status);
+            if (savedRideStartTime) {
+              setRideStartTime(Number(savedRideStartTime));
+            }
+          } else {
+            clearActiveRide();
+          }
+        }
       } catch (e) {
-        console.error("Error loading saved driver:", e);
+        console.error("❌ Error loading saved driver:", e);
+        localStorage.removeItem('driver');
+        setDriver(null);
       }
     }
   }, []);
+
+  useEffect(() => {
+    const validateSavedRide = async () => {
+      if (!driver || !currentRide?._id) return;
+
+      try {
+        const res = await axios.get(`${API_URL}/api/rides/${currentRide._id}`);
+        const ride = res.data.ride;
+        const status = ride.status || 'ACCEPTED';
+        const belongsToDriver = String(ride.driverId || '') === String(driver._id);
+
+        if (!belongsToDriver || !ACTIVE_RIDE_STATUSES.includes(status)) {
+          clearActiveRide();
+          notify('Previous saved ride was cleared because it is no longer active.', 'info');
+          return;
+        }
+
+        saveActiveRide(ride, status);
+      } catch (error) {
+        clearActiveRide();
+        notify('Previous saved ride was cleared because it could not be found.', 'info');
+      }
+    };
+
+    validateSavedRide();
+  }, [driver, currentRide?._id]);
+
+  // Load earnings when driver is set
+  useEffect(() => {
+    if (driver) {
+      loadEarnings();
+    }
+  }, [driver]);
 
   // Timer for started ride
   useEffect(() => {
@@ -62,7 +220,7 @@ function App() {
   useEffect(() => {
     if (!driver) return;
 
-    const newSocket = io('https://ride-backend-w2o0.onrender.com', {
+    const newSocket = io(API_URL, {
       transports: ['websocket'],
       reconnection: true
     });
@@ -70,8 +228,6 @@ function App() {
 
     newSocket.on('connect', () => {
       console.log('✅ Socket connected with ID:', newSocket.id);
-      
-      // Register driver
       newSocket.emit('register-driver', driver._id);
       
       if (isAvailable && location) {
@@ -124,29 +280,43 @@ function App() {
     // Listen for ride status updates
     newSocket.on('ride-status-updated', (data) => {
       console.log("🔄 Ride status updated:", data);
-      setCurrentRide(data.ride);
-      setRideStatus(data.status);
+      const savedCurrentRide = localStorage.getItem('driverCurrentRide');
+      const savedCurrentRideId = savedCurrentRide ? JSON.parse(savedCurrentRide)._id : null;
+      const activeRideId = currentRide?._id || savedCurrentRideId;
+      const isAssignedToDriver = !data.ride?.driverId || String(data.ride.driverId) === String(driver._id);
+      const isActiveRide = !activeRideId || String(data.rideId) === String(activeRideId);
+      if (!isAssignedToDriver || !isActiveRide) return;
+
+      saveActiveRide(data.ride, data.status);
       
       if (data.status === 'STARTED') {
-        setRideStartTime(Date.now());
-        alert('🎉 Ride started! Safe journey!');
+        const startTime = Date.now();
+        localStorage.setItem('driverRideStartTime', String(startTime));
+        setRideStartTime(startTime);
+        notify('Ride started. Safe journey.', 'success');
       } else if (data.status === 'COMPLETED') {
         setRideStartTime(null);
         setRideTimer(null);
-        alert('💰 Ride completed! Payment received.');
-        setCurrentRide(null);
-        setRideStatus(null);
+        localStorage.removeItem('driverRideStartTime');
+        notify('Ride completed. Processing payment...', 'success');
+        // Payment modal will open from completeRide function
       } else if (data.status === 'ACCEPTED') {
-        alert('✅ Ride accepted! Head to pickup location.');
+        notify('Ride accepted. Head to pickup location.', 'success');
       } else if (data.status === 'ARRIVING') {
-        alert('🚗 You have arrived at pickup location');
+        notify('Arrival marked. The rider can see that you are at pickup.', 'success');
       }
     });
 
-    newSocket.on('ride-otp', (data) => {
-      console.log("🔑 Ride OTP received:", data);
-      setRideOtp(data.otp);
-      setShowOtpInput(true);
+    newSocket.on('payment-success', (data) => {
+      const savedCurrentRide = localStorage.getItem('driverCurrentRide');
+      const savedCurrentRideId = savedCurrentRide ? JSON.parse(savedCurrentRide)._id : null;
+      const activeRideId = currentRide?._id || savedCurrentRideId;
+
+      if (String(data.rideId) !== String(activeRideId)) return;
+
+      clearActiveRide();
+      notify('Rider payment received.', 'success');
+      loadEarnings();
     });
 
     // Start watching location
@@ -165,7 +335,7 @@ function App() {
               lng: longitude
             });
             
-            axios.post(axios.post('https://ride-backend-w2o0.onrender.com/api/driver/register', form), {
+            axios.post(`${API_URL}/api/driver/update-location`, {
               driverId: driver._id,
               lat: latitude,
               lng: longitude,
@@ -175,7 +345,7 @@ function App() {
         },
         (error) => {
           console.error('❌ Geolocation error:', error);
-          alert('Please enable location access for the app');
+          notify('Please enable location access for the app.', 'error');
         },
         { 
           enableHighAccuracy: true,
@@ -190,7 +360,7 @@ function App() {
         processedRideIds.current.clear();
       };
     } else {
-      alert('Geolocation is not supported');
+      notify('Geolocation is not supported on this device.', 'error');
       return () => {
         newSocket.close();
         processedRideIds.current.clear();
@@ -198,31 +368,66 @@ function App() {
     }
   }, [driver, isAvailable]);
 
+  // ================ API FUNCTIONS ================
+  
+  const handleLogin = async () => {
+    const phone = loginForm.phone.trim();
+    const vehicleNumber = loginForm.vehicleNumber.trim();
+
+    if (!phone || !vehicleNumber) {
+      notify('Please enter phone number and vehicle number.', 'error');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await axios.post(`${API_URL}/api/driver/login`, {
+        phone,
+        vehicleNumber
+      });
+
+      if (res.data.success) {
+        const driverData = res.data.driver;
+        localStorage.setItem('driver', JSON.stringify(driverData));
+        setDriver(driverData);
+        setIsAvailable(driverData.isAvailable || false);
+        notify('Login successful.', 'success');
+      }
+    } catch (error) {
+      console.error("Driver login error:", error);
+      notify('Login failed: ' + (error.response?.data?.error || error.message), 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleRegister = async () => {
     if (!form.name || !form.phone || !form.vehicleNumber) {
-      alert('Please fill all fields');
+      notify('Please fill all fields.', 'error');
       return;
     }
 
     setLoading(true);
     try {
       console.log("📝 Registering with:", form);
-    const res = await axios.post(
-  'https://ride-backend-w2o0.onrender.com/api/driver/register',
-  form
-);
+      const res = await axios.post(`${API_URL}/api/driver/register`, form);
       console.log("📦 Register response:", res.data);
       
       if (res.data.success) {
         const driverData = res.data.driver;
+        if (!driverData._id) {
+          console.error("❌ No driver ID in response!");
+          notify('Registration failed - no driver ID.', 'error');
+          return;
+        }
         localStorage.setItem('driver', JSON.stringify(driverData));
         setDriver(driverData);
         setIsAvailable(false);
-        alert('✅ Registration successful!');
+        notify('Registration successful.', 'success');
       }
     } catch (error) {
       console.error("❌ Registration error:", error);
-      alert('Registration failed: ' + (error.response?.data?.error || error.message));
+      notify('Registration failed: ' + (error.response?.data?.error || error.message), 'error');
     } finally {
       setLoading(false);
     }
@@ -230,29 +435,27 @@ function App() {
 
   const toggleAvailability = async () => {
     if (!location) {
-      alert('📍 Getting your location... Please wait');
+      notify('Getting your location. Please wait.', 'info');
       return;
     }
 
     if (!driver || !driver._id) {
-      alert('❌ Driver not properly registered');
+      notify('Driver is not properly registered.', 'error');
       return;
     }
 
-   setLoading(true);
-try {
-  const newStatus = !isAvailable;
-  console.log("🚗 Toggling to:", newStatus ? "ONLINE" : "OFFLINE");
+    setLoading(true);
+    try {
+      const newStatus = !isAvailable;
+      console.log("🚗 Toggling to:", newStatus ? "ONLINE" : "OFFLINE");
 
-  const res = await axios.post(
-    'https://ride-backend-w2o0.onrender.com/api/driver/update-location',
-    {
-      driverId: driver._id,
-      lat: location.lat,
-      lng: location.lng,
-      isAvailable: newStatus
-    }
-  );
+      const res = await axios.post(`${API_URL}/api/driver/update-location`, {
+        driverId: driver._id,
+        lat: location.lat,
+        lng: location.lng,
+        isAvailable: newStatus
+      });
+      
       if (res.data.success) {
         setIsAvailable(newStatus);
         
@@ -271,7 +474,7 @@ try {
             console.log("📤 Emitting driver-offline event");
             socket.emit('driver-offline', { driverId: driver._id });
           }
-          alert(`✅ You are now ${newStatus ? 'ONLINE' : 'OFFLINE'}!`);
+          notify(`You are now ${newStatus ? 'ONLINE' : 'OFFLINE'}.`, 'success');
         }
         
         const updatedDriver = { ...driver, isAvailable: newStatus };
@@ -280,64 +483,50 @@ try {
       }
     } catch (error) {
       console.error("❌ Error:", error);
-      alert('Failed: ' + (error.response?.data?.error || error.message));
+      notify('Failed: ' + (error.response?.data?.error || error.message), 'error');
     } finally {
       setLoading(false);
     }
   };
 
-  // Accept ride function
- // Accept ride function - FIXED VERSION
-const acceptRide = async (rideId) => {
-  try {
-    console.log("🟢 Accepting ride with ID:", rideId);
-    
-    const res = await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/accept', {
-      rideId,
-      driverId: driver._id
-    });
-    
-    console.log("📦 Accept response:", res.data);
-    
-    if (res.data.success) {
-      console.log("✅ Setting currentRide:", res.data.ride);
-      setCurrentRide(res.data.ride);
+  const acceptRide = async (rideId) => {
+    try {
+      console.log("🟢 Accepting ride with ID:", rideId);
       
-      // IMPORTANT: Set rideStatus from response
-      if (res.data.ride && res.data.ride.status) {
-        console.log("✅ Setting rideStatus to:", res.data.ride.status);
-        setRideStatus(res.data.ride.status);
-      } else {
-        // Fallback - set to 'ACCEPTED'
-        console.log("⚠️ No status in response, setting to ACCEPTED");
-        setRideStatus('ACCEPTED');
+      const res = await axios.post(`${API_URL}/api/rides/accept`, {
+        rideId,
+        driverId: driver._id
+      });
+      
+      console.log("📦 Accept response:", res.data);
+      
+      if (res.data.success) {
+        console.log("✅ Setting currentRide:", res.data.ride);
+        saveActiveRide(res.data.ride, res.data.ride?.status || 'ACCEPTED');
+        
+        setRideRequests(prev => prev.filter(r => r.rideId !== rideId));
+        notify('Ride accepted.', 'success');
       }
-      
-      setRideRequests(prev => prev.filter(r => r.rideId !== rideId));
-      alert('✅ Ride accepted!');
+    } catch (error) {
+      console.error("❌ Error accepting ride:", error);
+      notify('Failed to accept ride: ' + (error.response?.data?.error || error.message), 'error');
     }
-  } catch (error) {
-    console.error("❌ Error accepting ride:", error);
-    alert('Failed to accept ride: ' + (error.response?.data?.error || error.message));
-  }
-};
+  };
 
-  // Reject ride function
   const rejectRide = async (rideId) => {
     try {
-      await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/reject', { rideId });
+      await axios.post(`${API_URL}/api/rides/reject`, { rideId });
       setRideRequests(prev => prev.filter(r => r.rideId !== rideId));
     } catch (error) {
       console.error("Error rejecting ride:", error);
     }
   };
 
-  // Update ride status
   const updateRideStatus = async (newStatus) => {
     if (!currentRide) return;
     
     try {
-      const res = await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/update-status', {
+      const res = await axios.post(`${API_URL}/api/rides/update-status`, {
         rideId: currentRide._id,
         status: newStatus,
         location: location
@@ -345,29 +534,45 @@ const acceptRide = async (rideId) => {
       
       if (res.data.success) {
         console.log(`✅ Ride status updated to ${newStatus}`);
+        saveActiveRide(res.data.ride, newStatus);
       }
     } catch (error) {
       console.error("Error updating ride status:", error);
+      notify('Could not update ride status.', 'error');
     }
   };
 
-  // Generate OTP when arrived
   const handleArrived = async () => {
-    await updateRideStatus('ARRIVING');
+    if (!currentRide) {
+      notify('No active ride found.', 'error');
+      return;
+    }
+    
     try {
-      const res = await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/generate-otp', {
+      console.log("🔑 Generating OTP for ride:", currentRide._id);
+      
+      const res = await axios.post(`${API_URL}/api/rides/generate-otp`, {
         rideId: currentRide._id
       });
-      console.log("OTP generated:", res.data);
+      
+      if (res.data.success) {
+        console.log("✅ OTP generated and sent to user");
+        await updateRideStatus('ARRIVING');
+        notify('OTP sent to user. Ask the user for the OTP to start the ride.', 'success');
+      } else {
+        console.log("❌ OTP generation failed:", res.data);
+        notify('Failed to generate OTP: ' + res.data.message, 'error');
+      }
+      
     } catch (error) {
-      console.error("Error generating OTP:", error);
+      console.error("❌ Error in handleArrived:", error);
+      notify('Failed to generate OTP: ' + (error.response?.data?.error || error.message), 'error');
     }
   };
 
-  // Verify OTP to start ride
   const verifyOtpAndStart = async () => {
     try {
-      const res = await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/verify-otp', {
+      const res = await axios.post(`${API_URL}/api/rides/verify-otp`, {
         rideId: currentRide._id,
         otp: enteredOtp
       });
@@ -375,71 +580,142 @@ const acceptRide = async (rideId) => {
       if (res.data.success) {
         setShowOtpInput(false);
         setEnteredOtp('');
-        alert('✅ Ride started!');
+        notify('Ride started.', 'success');
       }
     } catch (error) {
-      alert('❌ Invalid OTP');
+      notify('Invalid OTP.', 'error');
     }
   };
 
-  // Complete ride
   const completeRide = async () => {
-    await updateRideStatus('COMPLETED');
-    setCurrentRide(null);
-    setRideStatus(null);
-    setRideStartTime(null);
-    setRideTimer(null);
+    if (!currentRide) return;
+    
+    try {
+      await updateRideStatus('COMPLETED');
+      if (currentRide.paymentTiming === 'POSTPAID' && currentRide.paymentMethod === 'CARD') {
+        notify('Ride completed. Waiting for rider to pay by Stripe.', 'info');
+        return;
+      }
+
+      showPaymentScreen(currentRide);
+    } catch (error) {
+      console.error("Error completing ride:", error);
+    }
   };
 
   const handleLogout = () => {
     if (isAvailable) {
-      alert('Please go offline first');
+      notify('Please go offline first.', 'error');
       return;
     }
     localStorage.removeItem('driver');
+    clearActiveRide();
     setDriver(null);
     setIsAvailable(false);
     if (socket) socket.close();
   };
 
-  // Registration form
+  const formatDistance = (value) => {
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) ? numericValue.toFixed(2) : 'Calculating';
+  };
+
+  // ================ RENDER FUNCTIONS ================
+  
+  // Login / registration form
   if (!driver) {
     return (
       <div style={styles.loginContainer}>
         <div style={styles.logo}>🚖</div>
-        <h2 style={styles.title}>Driver Registration</h2>
-        
-        <input
-          placeholder="Full Name"
-          style={styles.input}
-          value={form.name}
-          onChange={(e) => setForm({...form, name: e.target.value})}
-        />
-        <input
-          placeholder="Phone Number"
-          style={styles.input}
-          value={form.phone}
-          onChange={(e) => setForm({...form, phone: e.target.value})}
-        />
-        <select
-          style={styles.input}
-          value={form.vehicleType}
-          onChange={(e) => setForm({...form, vehicleType: e.target.value})}
-        >
-          <option value="Mini">🚗 Mini</option>
-          <option value="Sedan">🚙 Sedan</option>
-          <option value="SUV">🚐 SUV</option>
-          <option value="Auto">🛺 Auto</option>
-        </select>
-        <input
-          placeholder="Vehicle Number"
-          style={styles.input}
-          value={form.vehicleNumber}
-          onChange={(e) => setForm({...form, vehicleNumber: e.target.value})}
-        />
-        <button style={styles.registerBtn} onClick={handleRegister} disabled={loading}>
-          {loading ? 'Registering...' : 'Register & Start Driving'}
-        </button>
+        <h2 style={styles.title}>{authMode === 'login' ? 'Driver Login' : 'Driver Registration'}</h2>
+        {notice.message && (
+          <div style={{
+            ...styles.notice,
+            ...(notice.type === 'error' ? styles.noticeError : {}),
+            ...(notice.type === 'success' ? styles.noticeSuccess : {})
+          }}>
+            {notice.message}
+          </div>
+        )}
+
+        <div style={styles.authTabs}>
+          <button
+            style={{
+              ...styles.authTab,
+              ...(authMode === 'login' ? styles.authTabActive : {})
+            }}
+            onClick={() => setAuthMode('login')}
+            type="button"
+          >
+            Login
+          </button>
+          <button
+            style={{
+              ...styles.authTab,
+              ...(authMode === 'register' ? styles.authTabActive : {})
+            }}
+            onClick={() => setAuthMode('register')}
+            type="button"
+          >
+            Register
+          </button>
+        </div>
+
+        {authMode === 'login' ? (
+          <>
+            <input
+              placeholder="Phone Number"
+              style={styles.input}
+              value={loginForm.phone}
+              onChange={(e) => setLoginForm({...loginForm, phone: e.target.value})}
+            />
+            <input
+              placeholder="Vehicle Number"
+              style={styles.input}
+              value={loginForm.vehicleNumber}
+              onChange={(e) => setLoginForm({...loginForm, vehicleNumber: e.target.value})}
+            />
+
+            <button style={styles.registerBtn} onClick={handleLogin} disabled={loading}>
+              {loading ? 'Logging in...' : 'Login & Start Driving'}
+            </button>
+          </>
+        ) : (
+          <>
+            <input
+              placeholder="Full Name"
+              style={styles.input}
+              value={form.name}
+              onChange={(e) => setForm({...form, name: e.target.value})}
+            />
+            <input
+              placeholder="Phone Number"
+              style={styles.input}
+              value={form.phone}
+              onChange={(e) => setForm({...form, phone: e.target.value})}
+            />
+            <select
+              style={styles.input}
+              value={form.vehicleType}
+              onChange={(e) => setForm({...form, vehicleType: e.target.value})}
+            >
+              <option value="Mini">🚗 Mini</option>
+              <option value="Sedan">🚙 Sedan</option>
+              <option value="SUV">🚐 SUV</option>
+              <option value="Auto">🛺 Auto</option>
+            </select>
+            <input
+              placeholder="Vehicle Number"
+              style={styles.input}
+              value={form.vehicleNumber}
+              onChange={(e) => setForm({...form, vehicleNumber: e.target.value})}
+            />
+
+            <button style={styles.registerBtn} onClick={handleRegister} disabled={loading}>
+              {loading ? 'Registering...' : 'Register & Start Driving'}
+            </button>
+          </>
+        )}
         <p style={styles.note}>⚠️ Enable location access</p>
       </div>
     );
@@ -448,6 +724,16 @@ const acceptRide = async (rideId) => {
   // Driver dashboard
   return (
     <div style={styles.container}>
+      {notice.message && (
+        <div style={{
+          ...styles.notice,
+          ...(notice.type === 'error' ? styles.noticeError : {}),
+          ...(notice.type === 'success' ? styles.noticeSuccess : {})
+        }}>
+          {notice.message}
+        </div>
+      )}
+
       {/* Header */}
       <div style={styles.header}>
         <div>
@@ -498,7 +784,7 @@ const acceptRide = async (rideId) => {
                 <p><strong>📍 From:</strong> {ride.pickup?.address || `${ride.pickup?.lat}, ${ride.pickup?.lng}`}</p>
                 <p><strong>🏁 To:</strong> {ride.drop?.address || `${ride.drop?.lat}, ${ride.drop?.lng}`}</p>
                 <p><strong>💰 Fare:</strong> ₹{ride.fare}</p>
-                <p><strong>📏 Distance:</strong> {ride.distance} km</p>
+                <p><strong>📏 Distance:</strong> {formatDistance(ride.distance)} km</p>
               </div>
               <div style={styles.rideActions}>
                 <button onClick={() => acceptRide(ride.rideId)} style={styles.acceptBtn}>✅ Accept</button>
@@ -509,72 +795,84 @@ const acceptRide = async (rideId) => {
         </div>
       )}
 
-      {/* Current Ride Section - WITH START/END BUTTONS */}
-     {currentRide && (
-  <div style={styles.currentRideCard}>
-    <h3>🟢 Current Ride - {rideStatus || 'ACCEPTED'}</h3>  {/* Show ACCEPTED if null */}
-    <p>Ride ID: {currentRide._id?.slice(-6) || 'N/A'}</p>
-    <p>📍 Pickup: {currentRide.pickupLocation?.address || 'Pickup location'}</p>
-    <p>🏁 Drop: {currentRide.dropLocation?.address || 'Drop location'}</p>
-    
-    {/* Debug Info */}
-    <div style={{background: '#f0f0f0', padding: '10px', borderRadius: '5px', marginBottom: '10px'}}>
-      <p style={{fontSize: '12px', color: '#333'}}>
-        <strong>Debug:</strong> Status: {rideStatus || 'null'} | Socket: {socket?.connected ? '✅' : '❌'}
-      </p>
-    </div>
-    
-    {/* Show buttons based on status - with fallback to ACCEPTED */}
-    {(rideStatus === 'ACCEPTED' || rideStatus === null) && (
-      <>
-        <button onClick={() => updateRideStatus('ARRIVING')} style={styles.arrivingBtn}>
-          🚗 I've Arrived at Pickup
-        </button>
-        <button onClick={() => setShowOtpInput(true)} style={styles.otpBtn}>
-          Enter OTP to Start
-        </button>
-      </>
-    )}
-    
-    {rideStatus === 'ARRIVING' && (
-      <>
-        <button onClick={handleArrived} style={styles.arrivingBtn}>
-          🔑 Generate OTP
-        </button>
-        <button onClick={() => setShowOtpInput(true)} style={styles.otpBtn}>
-          Enter OTP to Start
-        </button>
-      </>
-    )}
-    
-    {showOtpInput && (
-      <div style={styles.otpContainer}>
-        <input
-          type="text"
-          placeholder="Enter 6-digit OTP"
-          value={enteredOtp}
-          onChange={(e) => setEnteredOtp(e.target.value)}
-          maxLength="6"
-          style={styles.otpInput}
-        />
-        <button onClick={verifyOtpAndStart} style={styles.verifyBtn}>
-          Verify & Start Ride
-        </button>
-      </div>
-    )}
-    
-    {rideStatus === 'STARTED' && (
-      <>
-        <div style={styles.timerDisplay}>
-          ⏱️ Ride Time: {rideTimer || '0:00'}
+      {/* Current Ride Section */}
+      {currentRide && (
+        <div style={styles.currentRideCard}>
+          <div style={styles.currentRideHeader}>
+            <h3 style={styles.currentRideTitle}>🟢 Current Ride - {rideStatus || 'ACCEPTED'}</h3>
+            <button
+              type="button"
+              onClick={() => {
+                clearActiveRide();
+                notify('Saved ride cleared.', 'info');
+              }}
+              style={styles.clearRideBtn}
+            >
+              Clear
+            </button>
+          </div>
+          <p>📍 Pickup: {currentRide.pickupLocation?.address || 'Pickup location'}</p>
+          <p>🏁 Drop: {currentRide.dropLocation?.address || 'Drop location'}</p>
+          
+          {/* Show buttons based on status */}
+          {(rideStatus === 'ACCEPTED' || rideStatus === null) && (
+            <>
+              <button onClick={() => updateRideStatus('ARRIVING')} style={styles.arrivingBtn}>
+                🚗 I've Arrived at Pickup
+              </button>
+              <button onClick={() => setShowOtpInput(true)} style={styles.otpBtn}>
+                Enter OTP to Start
+              </button>
+            </>
+          )}
+          
+          {rideStatus === 'ARRIVING' && (
+            <>
+              <button onClick={handleArrived} style={styles.arrivingBtn}>
+                🔑 Generate OTP
+              </button>
+              <button onClick={() => setShowOtpInput(true)} style={styles.otpBtn}>
+                Enter OTP to Start
+              </button>
+            </>
+          )}
+          
+          {showOtpInput && (
+            <div style={styles.otpContainer}>
+              <input
+                type="text"
+                placeholder="Enter 6-digit OTP"
+                value={enteredOtp}
+                onChange={(e) => setEnteredOtp(e.target.value)}
+                maxLength="6"
+                style={styles.otpInput}
+              />
+              <button onClick={verifyOtpAndStart} style={styles.verifyBtn}>
+                Verify & Start Ride
+              </button>
+            </div>
+          )}
+          
+          {rideStatus === 'STARTED' && (
+            <>
+              <div style={styles.timerDisplay}>
+                ⏱️ Ride Time: {rideTimer || '0:00'}
+              </div>
+              <button onClick={completeRide} style={styles.completeBtn}>
+                ✅ END RIDE & COMPLETE
+              </button>
+            </>
+          )}
+
+          <RideChat
+            socket={socket}
+            ride={{ ...currentRide, status: rideStatus || currentRide.status }}
+            participantId={driver._id}
+            participantType="driver"
+            participantName={driver.name}
+          />
         </div>
-        <button onClick={completeRide} style={styles.completeBtn}>
-          ✅ END RIDE & COMPLETE
-        </button>
-      </>
-    )}
-  </div>
-)}
+      )}
 
       {/* Vehicle Info */}
       <div style={styles.infoCard}>
@@ -587,21 +885,21 @@ const acceptRide = async (rideId) => {
         </div>
       </div>
 
-      {/* Stats */}
+      {/* Stats with Real Earnings */}
       <div style={styles.statsCard}>
         <h3>📊 Today's Stats</h3>
         <div style={styles.statsGrid}>
           <div style={styles.statItem}>
-            <span style={styles.statValue}>0</span>
+            <span style={styles.statValue}>{earnings.trips}</span>
             <span style={styles.statLabel}>Trips</span>
           </div>
           <div style={styles.statItem}>
-            <span style={styles.statValue}>₹0</span>
-            <span style={styles.statLabel}>Earnings</span>
+            <span style={styles.statValue}>₹{earnings.today}</span>
+            <span style={styles.statLabel}>Today</span>
           </div>
           <div style={styles.statItem}>
-            <span style={styles.statValue}>4.9⭐</span>
-            <span style={styles.statLabel}>Rating</span>
+            <span style={styles.statValue}>₹{earnings.total}</span>
+            <span style={styles.statLabel}>Total</span>
           </div>
         </div>
       </div>
@@ -611,9 +909,22 @@ const acceptRide = async (rideId) => {
         <p style={styles.status}>Status: {isAvailable ? '🟢 Online' : '🔴 Offline'}</p>
         <button onClick={handleLogout} style={styles.logoutBtn}>Logout</button>
       </div>
+
+      {/* Payment Modal - Always at the end of return */}
+      {showPaymentModal && paymentDetails && (
+        <Payment
+          isOpen={showPaymentModal}
+          onClose={() => setShowPaymentModal(false)}
+          amount={paymentDetails.amount}
+          rideDetails={paymentDetails}
+          onPaymentComplete={handlePaymentComplete}
+          userType="driver"
+        />
+      )}
     </div>
   );
 }
+
 // Styles
 const styles = {
   container: {
@@ -641,6 +952,50 @@ const styles = {
     textAlign: 'center',
     marginBottom: '30px',
     color: '#333'
+  },
+  notice: {
+    padding: '12px',
+    marginBottom: '16px',
+    borderRadius: '8px',
+    background: '#eff6ff',
+    border: '1px solid #bfdbfe',
+    color: '#1d4ed8',
+    fontSize: '14px',
+    fontWeight: '600'
+  },
+  noticeError: {
+    background: '#fef2f2',
+    border: '1px solid #fecaca',
+    color: '#b91c1c'
+  },
+  noticeSuccess: {
+    background: '#ecfdf5',
+    border: '1px solid #a7f3d0',
+    color: '#047857'
+  },
+  authTabs: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '8px',
+    padding: '4px',
+    background: '#f1f5f9',
+    borderRadius: '10px',
+    marginBottom: '20px'
+  },
+  authTab: {
+    padding: '10px',
+    border: 'none',
+    borderRadius: '8px',
+    background: 'transparent',
+    color: '#555',
+    fontSize: '14px',
+    fontWeight: 'bold',
+    cursor: 'pointer'
+  },
+  authTabActive: {
+    background: 'white',
+    color: '#4CAF50',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.08)'
   },
   input: {
     width: '100%',
@@ -745,15 +1100,23 @@ const styles = {
     marginBottom: '20px',
     border: '2px solid #4CAF50'
   },
-  completeBtn: {
-    width: '100%',
-    padding: '10px',
-    background: '#2196F3',
-    color: 'white',
-    border: 'none',
-    borderRadius: '5px',
+  currentRideHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '10px'
+  },
+  currentRideTitle: {
+    margin: 0,
+    fontSize: '18px'
+  },
+  clearRideBtn: {
+    border: '1px solid #4CAF50',
+    background: 'white',
+    color: '#2e7d32',
+    borderRadius: '6px',
+    padding: '6px 10px',
     cursor: 'pointer',
-    marginTop: '10px',
     fontWeight: 'bold'
   },
   statusCard: {
@@ -856,66 +1219,7 @@ const styles = {
     cursor: 'pointer',
     fontSize: '0.9rem'
   },
-   arrivingBtn: {
-    width: '100%',
-    padding: '12px',
-    background: '#FF9800',
-    color: 'white',
-    border: 'none',
-    borderRadius: '8px',
-    marginTop: '10px',
-    cursor: 'pointer',
-    fontWeight: 'bold'
-  },
-  otpBtn: {
-    width: '100%',
-    padding: '12px',
-    background: '#2196F3',
-    color: 'white',
-    border: 'none',
-    borderRadius: '8px',
-    marginTop: '10px',
-    cursor: 'pointer',
-    fontWeight: 'bold'
-  },
-  otpContainer: {
-    marginTop: '15px',
-    padding: '10px',
-    background: '#f5f5f5',
-    borderRadius: '8px'
-  },
-  otpInput: {
-    width: '100%',
-    padding: '12px',
-    fontSize: '20px',
-    textAlign: 'center',
-    letterSpacing: '8px',
-    border: '2px solid #ddd',
-    borderRadius: '8px',
-    marginBottom: '10px',
-    boxSizing: 'border-box'
-  },
-  verifyBtn: {
-    width: '100%',
-    padding: '12px',
-    background: '#4CAF50',
-    color: 'white',
-    border: 'none',
-    borderRadius: '8px',
-    cursor: 'pointer',
-    fontWeight: 'bold'
-  },
-  timerDisplay: {
-  textAlign: 'center',
-  fontSize: '1.5rem',
-  fontWeight: 'bold',
-  color: '#4CAF50',
-  padding: '10px',
-  background: '#e8f5e8',
-  borderRadius: '8px',
-  margin: '10px 0'
-},
- arrivingBtn: {
+  arrivingBtn: {
     width: '100%',
     padding: '12px',
     background: '#FF9800',
@@ -986,8 +1290,6 @@ const styles = {
     cursor: 'pointer',
     marginTop: '10px'
   }
-
-
 };
 
 export default App;

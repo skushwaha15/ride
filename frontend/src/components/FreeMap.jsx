@@ -1,8 +1,12 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { MapContainer, TileLayer, Marker, Popup, Polyline } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useMap } from "react-leaflet";
+
+const API_URL = process.env.REACT_APP_API_URL || (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? 'http://localhost:10000'
+  : 'https://ride-backend-w20.onrender.com');
 
 function ChangeView({ center, bounds }) {
   const map = useMap();
@@ -45,161 +49,192 @@ const redIcon = new L.Icon({
   shadowSize: [41, 41]
 });
 
-// Function to fetch route from multiple providers
-async function fetchRoute(start, end, setFare, setRouteGeometry, setDistance, setDuration) {
+// Driver marker icon (blue)
+const driverIcon = new L.Icon({
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png",
+  shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png",
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41]
+});
+
+async function fetchRoute(start, end, setFare, setRouteGeometry, setDistance, setDuration, setError, setRouteSource) {
+  const setTripMetrics = (rawDistanceInKm, rawDurationInMin, rawFare) => {
+    const normalizedDistance = Number(rawDistanceInKm.toFixed(2));
+    const normalizedDuration = Math.max(1, Math.ceil(Number(rawDurationInMin)));
+
+    setFare(Math.round(rawFare ?? normalizedDistance * 10));
+    setDistance(normalizedDistance);
+    setDuration(normalizedDuration);
+  };
+
   try {
     console.log("Fetching route from:", start, "to:", end);
+
+    // Validate coordinates
+    if (!start.lat || !start.lng || !end.lat || !end.lng) {
+      throw new Error("Invalid coordinates provided");
+    }
+
+    // Use the pickupLocation/dropLocation object format that server expects
+    const requestBody = {
+      pickupLocation: {
+        lat: start.lat,
+        lng: start.lng
+      },
+      dropLocation: {
+        lat: end.lat,
+        lng: end.lng
+      },
+      vehicleType: 'Mini'
+    };
+
+    console.log("Sending request to backend:", requestBody);
+
+    const response = await fetch(`${API_URL}/api/fare/estimate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody)
+    });
     
-    // Try OSRM first
-    try {
-      const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`;
-      
-      const response = await fetch(osrmUrl, {
-        mode: 'cors',
-        headers: {
-          'Accept': 'application/json'
-        }
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        
-        if (data.routes && data.routes.length > 0) {
-          const route = data.routes[0];
-          const distanceInKm = route.distance / 1000;
-          const durationInMin = Math.round(route.duration / 60);
-          const fare = Math.round(distanceInKm * 10);
-          
-          console.log("OSRM Route found:", distanceInKm, "km");
-          
-          setFare(fare);
-          setDistance(distanceInKm);
-          setDuration(durationInMin);
-          
-          const coordinates = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
-          setRouteGeometry(coordinates);
-          
-          return;
-        }
-      }
-    } catch (osrmError) {
-      console.log("OSRM failed, trying alternative...", osrmError);
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(data.error || "OpenRouteService route request failed");
+    }
+
+    if (!data.success || data.source !== 'openrouteservice' || typeof data.distance !== 'number') {
+      console.warn("ORS route not available:", data);
+      throw new Error(data.error || "Real route distance is unavailable");
+    }
+
+    console.log("Backend ORS route found:", data.distance, "km");
+    setTripMetrics(data.distance, data.duration, data.fare);
+    
+    // Convert geometry coordinates from [lng, lat] to [lat, lng] if needed
+    let geometry = data.route?.geometry || [];
+    if (geometry.length > 0 && geometry[0] && geometry[0].length === 2) {
+      geometry = geometry.map(coord => [coord[0], coord[1]]);
     }
     
-    // Try GraphHopper as alternative (public demo endpoint)
-    try {
-      const graphHopperUrl = `https://graphhopper.com/api/1/route?point=${start.lat},${start.lng}&point=${end.lat},${end.lng}&vehicle=car&locale=en&key=2b3f4b5c-4b5c-4b5c-4b5c-2b3f4b5c4b5c&points_encoded=false`;
-      
-      const response = await fetch(graphHopperUrl);
-      
-      if (response.ok) {
-        const data = await response.json();
-        
-        if (data.paths && data.paths.length > 0) {
-          const route = data.paths[0];
-          const distanceInKm = route.distance / 1000;
-          const durationInMin = Math.round(route.time / 60000);
-          const fare = Math.round(distanceInKm * 10);
-          
-          console.log("GraphHopper route found:", distanceInKm, "km");
-          
-          setFare(fare);
-          setDistance(distanceInKm);
-          setDuration(durationInMin);
-          
-          const coordinates = route.points.coordinates.map(coord => [coord[1], coord[0]]);
-          setRouteGeometry(coordinates);
-          
-          return;
-        }
-      }
-    } catch (graphHopperError) {
-      console.log("GraphHopper failed", graphHopperError);
-    }
-    
-    // Try OpenRouteService as another alternative (free tier)
-    try {
-      const orsUrl = `https://api.openrouteservice.org/v2/directions/driving-car?api_key=5b3ce3597851110001cf6248c0b8f9a7f5d44f5d9a7f5d44f5d9a7f5&start=${start.lng},${start.lat}&end=${end.lng},${end.lat}`;
-      
-      const response = await fetch(orsUrl);
-      
-      if (response.ok) {
-        const data = await response.json();
-        
-        if (data.features && data.features.length > 0) {
-          const route = data.features[0];
-          const distanceInKm = route.properties.summary.distance / 1000;
-          const durationInMin = Math.round(route.properties.summary.duration / 60);
-          const fare = Math.round(distanceInKm * 10);
-          
-          console.log("OpenRouteService route found:", distanceInKm, "km");
-          
-          setFare(fare);
-          setDistance(distanceInKm);
-          setDuration(durationInMin);
-          
-          const coordinates = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
-          setRouteGeometry(coordinates);
-          
-          return;
-        }
-      }
-    } catch (orsError) {
-      console.log("OpenRouteService failed", orsError);
-    }
-    
-    // If all routing services fail, draw a straight line and estimate
-    console.log("Using straight line approximation");
-    const distanceInKm = calculateDistance(start.lat, start.lng, end.lat, end.lng);
-    const durationInMin = Math.round(distanceInKm * 2);
-    const fare = Math.round(distanceInKm * 10);
-    
-    setFare(fare);
-    setDistance(distanceInKm);
-    setDuration(durationInMin);
-    
-    setRouteGeometry([
-      [start.lat, start.lng],
-      [end.lat, end.lng]
-    ]);
-    
+    setRouteGeometry(geometry);
+    setRouteSource(data.source);
+    setError(null);
   } catch (error) {
-    console.error("All routing services failed:", error);
-    
-    const distanceInKm = calculateDistance(start.lat, start.lng, end.lat, end.lng);
-    const fare = Math.round(distanceInKm * 10);
-    
-    setFare(fare);
-    setDistance(distanceInKm);
-    setRouteGeometry([
-      [start.lat, start.lng],
-      [end.lat, end.lng]
-    ]);
+    console.error("OpenRouteService route failed:", error);
+    setFare(0);
+    setDistance(null);
+    setDuration(null);
+    setRouteGeometry([]);
+    setRouteSource(null);
+    setError(error.message || "Real route distance is unavailable");
   }
 }
 
-// Calculate straight line distance (Haversine formula)
-function calculateDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = 
-    Math.sin(dLat/2) * Math.sin(dLat/2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
-    Math.sin(dLon/2) * Math.sin(dLon/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R * c;
+const formatDuration = (minutes) => {
+  if (typeof minutes !== 'number' || !Number.isFinite(minutes)) {
+    return 'Calculating';
+  }
+
+  const roundedMinutes = Math.max(1, Math.ceil(minutes));
+  if (roundedMinutes < 60) {
+    return `${roundedMinutes} min`;
+  }
+
+  const hours = Math.floor(roundedMinutes / 60);
+  const mins = roundedMinutes % 60;
+  return mins ? `${hours} hr ${mins} min` : `${hours} hr`;
+};
+
+// Component to handle driver marker updates
+function DriverMarker({ position, show }) {
+  const map = useMap();
+  const markerRef = useRef(null);
+
+  useEffect(() => {
+    if (!show || !position || !position.lat || !position.lng) {
+      // Remove marker if it exists
+      if (markerRef.current) {
+        markerRef.current.remove();
+        markerRef.current = null;
+      }
+      return;
+    }
+
+    // Create or update driver marker
+    if (!markerRef.current) {
+      markerRef.current = L.marker([position.lat, position.lng], {
+        icon: driverIcon,
+        zIndexOffset: 100
+      }).addTo(map);
+      
+      markerRef.current.bindPopup(`
+        <div style="padding: 5px;">
+          <strong>🚗 Driver Location</strong><br/>
+          Your driver is here
+        </div>
+      `);
+    } else {
+      markerRef.current.setLatLng([position.lat, position.lng]);
+    }
+
+    // Optionally center map on driver when toggled
+    if (show && markerRef.current) {
+      map.setView([position.lat, position.lng], 14);
+    }
+
+    return () => {
+      if (markerRef.current) {
+        markerRef.current.remove();
+        markerRef.current = null;
+      }
+    };
+  }, [position, show, map]);
+
+  return null;
 }
 
-function FreeMap({ setFare, pickupLocation, dropLocation }) {
+function FreeMap({ 
+  setFare, 
+  pickupLocation, 
+  dropLocation, 
+  setTripDistance, 
+  setTripDuration,
+  driverLocation = null,      // New prop for driver location
+  showDriverMarker = false     // New prop to control driver marker visibility
+}) {
   const [pickup, setPickup] = useState(null);
   const [drop, setDrop] = useState(null);
   const [routeGeometry, setRouteGeometry] = useState([]);
   const [distance, setDistance] = useState(null);
   const [duration, setDuration] = useState(null);
+  const [fareEstimate, setFareEstimate] = useState(null);
+  const [routeSource, setRouteSource] = useState(null);
   const [mapBounds, setMapBounds] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  const updateFare = (value) => {
+    setFareEstimate(value);
+    setFare(value);
+  };
+
+  const updateDistance = (value) => {
+    setDistance(value);
+    if (setTripDistance) {
+      setTripDistance(value);
+    }
+  };
+
+  const updateDuration = (value) => {
+    setDuration(value);
+    if (setTripDuration) {
+      setTripDuration(value);
+    }
+  };
 
   // Handle when locations are passed from Home
   useEffect(() => {
@@ -211,6 +246,10 @@ function FreeMap({ setFare, pickupLocation, dropLocation }) {
         setDrop(dropLocation);
         setLoading(true);
         setError(null);
+        setRouteSource(null);
+        setFareEstimate(null);
+        updateDistance(null);
+        updateDuration(null);
         
         const bounds = L.latLngBounds(
           [pickupLocation.lat, pickupLocation.lng],
@@ -221,10 +260,12 @@ function FreeMap({ setFare, pickupLocation, dropLocation }) {
         await fetchRoute(
           pickupLocation, 
           dropLocation, 
-          setFare, 
+          updateFare, 
           setRouteGeometry, 
-          setDistance, 
-          setDuration
+          updateDistance, 
+          updateDuration,
+          setError,
+          setRouteSource
         );
         
         setLoading(false);
@@ -232,19 +273,7 @@ function FreeMap({ setFare, pickupLocation, dropLocation }) {
     };
     
     loadRouteFromProps();
-  }, [pickupLocation, dropLocation, setFare]);
-
-  // Reset function - COMMENTED OUT SO IT DOESN'T APPEAR
-  // const resetSelection = () => {
-  //   setPickup(null);
-  //   setDrop(null);
-  //   setRouteGeometry([]);
-  //   setDistance(null);
-  //   setDuration(null);
-  //   setMapBounds(null);
-  //   setError(null);
-  //   setFare(0);
-  // };
+  }, [pickupLocation, dropLocation, setFare, setTripDistance, setTripDuration]);
 
   return (
     <div style={{ position: 'relative', height: '100%', width: '100%' }}>
@@ -275,9 +304,9 @@ function FreeMap({ setFare, pickupLocation, dropLocation }) {
         {pickup && (
           <Marker position={[pickup.lat, pickup.lng]} icon={greenIcon}>
             <Popup>
-              <b>Pickup Location</b>
+              <b>📍 Pickup Location</b>
               <br />
-              Lat: {pickup.lat.toFixed(4)}, Lng: {pickup.lng.toFixed(4)}
+              {pickup.address || `${pickup.lat.toFixed(4)}, ${pickup.lng.toFixed(4)}`}
             </Popup>
           </Marker>
         )}
@@ -286,15 +315,21 @@ function FreeMap({ setFare, pickupLocation, dropLocation }) {
         {drop && (
           <Marker position={[drop.lat, drop.lng]} icon={redIcon}>
             <Popup>
-              <b>Drop Location</b>
+              <b>🏁 Drop Location</b>
               <br />
-              Lat: {drop.lat.toFixed(4)}, Lng: {drop.lng.toFixed(4)}
+              {drop.address || `${drop.lat.toFixed(4)}, ${drop.lng.toFixed(4)}`}
             </Popup>
           </Marker>
         )}
+        
+        {/* Driver Marker - Only shown when ride is active and user toggles it */}
+        <DriverMarker 
+          position={driverLocation} 
+          show={showDriverMarker && driverLocation !== null}
+        />
       </MapContainer>
 
-      {/* Trip Info Panel - NO RESET BUTTON */}
+      {/* Trip Info Panel */}
       {(pickup || drop) && (
         <div style={{
           position: 'absolute',
@@ -312,13 +347,13 @@ function FreeMap({ setFare, pickupLocation, dropLocation }) {
           
           {pickup && (
             <p style={{ margin: '5px 0', color: '#4CAF50', fontSize: '0.9rem' }}>
-              <strong>Pickup:</strong> {pickup.lat.toFixed(4)}, {pickup.lng.toFixed(4)}
+              <strong>Pickup:</strong> {pickup.address || `${pickup.lat.toFixed(4)}, ${pickup.lng.toFixed(4)}`}
             </p>
           )}
           
           {drop && (
             <p style={{ margin: '5px 0', color: '#f44336', fontSize: '0.9rem' }}>
-              <strong>Drop:</strong> {drop.lat.toFixed(4)}, {drop.lng.toFixed(4)}
+              <strong>Drop:</strong> {drop.address || `${drop.lat.toFixed(4)}, ${drop.lng.toFixed(4)}`}
             </p>
           )}
           
@@ -334,14 +369,14 @@ function FreeMap({ setFare, pickupLocation, dropLocation }) {
             </p>
           )}
           
-          {distance && !loading && (
+          {distance !== null && !loading && (
             <>
               <hr style={{ margin: '10px 0' }} />
               <p style={{ margin: '5px 0' }}>
                 <strong>📏 Distance:</strong> {distance.toFixed(2)} km
               </p>
               <p style={{ margin: '5px 0' }}>
-                <strong>⏱️ Duration:</strong> {duration} mins
+                <strong>⏱️ Ride time:</strong> {formatDuration(duration)}
               </p>
               <p style={{ 
                 margin: '10px 0 0 0', 
@@ -349,17 +384,28 @@ function FreeMap({ setFare, pickupLocation, dropLocation }) {
                 color: '#4CAF50',
                 fontWeight: 'bold'
               }}>
-                ₹{Math.round(distance * 10)}
+                ₹{fareEstimate}
               </p>
-              {routeGeometry.length === 2 && (
-                <p style={{ margin: '5px 0', fontSize: '0.8rem', color: '#999' }}>
-                  *Straight line estimate (road route unavailable)
-                </p>
-              )}
             </>
           )}
           
-          {/* RESET BUTTON COMPLETELY REMOVED */}
+          {/* Driver Info Panel - Only shown when driver is assigned */}
+          {showDriverMarker && driverLocation && (
+            <div style={{
+              marginTop: '10px',
+              padding: '10px',
+              background: '#E3F2FD',
+              borderRadius: '5px',
+              borderLeft: '3px solid #2196F3'
+            }}>
+              <p style={{ margin: '0', fontSize: '0.85rem', color: '#1565C0' }}>
+                🚗 Driver is on the way!
+              </p>
+              <p style={{ margin: '5px 0 0 0', fontSize: '0.8rem', color: '#1976D2' }}>
+                Location: {driverLocation.lat.toFixed(4)}, {driverLocation.lng.toFixed(4)}
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>

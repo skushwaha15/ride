@@ -1,23 +1,55 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import bg from "../assets/car1.jpg";
-import { FaMapMarkerAlt, FaSearch, FaCar, FaClock, FaShieldAlt, FaStar, FaPhone, FaEnvelope, FaFacebook, FaTwitter, FaInstagram, FaArrowRight } from "react-icons/fa";
+import { 
+  FaMapMarkerAlt, 
+  FaSearch, 
+  FaCar, 
+  FaClock, 
+  FaShieldAlt, 
+  FaStar, 
+  FaPhone, 
+  FaEnvelope, 
+  FaFacebook, 
+  FaTwitter, 
+  FaInstagram, 
+  FaArrowRight,
+  FaUser,
+  FaSignOutAlt
+} from "react-icons/fa";
+import axios from 'axios';
+
+// API URL - environment based
+const API_URL = window.location.hostname === 'localhost' 
+  ? 'http://localhost:10000' 
+  : 'https://ride-backend-w20.onrender.com';
 
 function Home() {
   const navigate = useNavigate();
   const [pickup, setPickup] = useState("");
   const [drop, setDrop] = useState("");
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState("Daily");
-  const [recentSearches] = useState([
-    "Mumbai Airport",
-    "Andheri Station",
-    "Bandra Kurla Complex"
-  ]);
+  const [user, setUser] = useState(null);
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [estimatedFare, setEstimatedFare] = useState(null);
+  const [showEstimate, setShowEstimate] = useState(false);
+  const [usingCurrentLocation, setUsingCurrentLocation] = useState(false);
 
-  const tabs = ["Daily", "Rental", "Outstation"];
+  // ============== LOAD USER ON STARTUP ==============
+  useEffect(() => {
+    const savedUser = localStorage.getItem('user');
+    if (savedUser) {
+      try {
+        const userData = JSON.parse(savedUser);
+        setUser(userData);
+      } catch (error) {
+        console.error("Error loading user:", error);
+        localStorage.removeItem('user');
+      }
+    }
+  }, []);
 
-  // Get current location
+  // ============== GET CURRENT LOCATION ==============
   const getCurrentLocation = () => {
     setLoading(true);
     
@@ -34,6 +66,7 @@ function Home() {
             
             const address = data.display_name?.split(',')[0] || "Current Location";
             setPickup(address);
+            setUsingCurrentLocation(true);
             
             sessionStorage.setItem("currentLocation", JSON.stringify({
               lat: latitude,
@@ -44,6 +77,7 @@ function Home() {
           } catch (error) {
             console.error("Error getting address:", error);
             setPickup("Current Location");
+            setUsingCurrentLocation(true);
             
             sessionStorage.setItem("currentLocation", JSON.stringify({
               lat: latitude,
@@ -58,6 +92,11 @@ function Home() {
           console.error("Error getting location:", error);
           alert("Please enable location access or enter pickup manually");
           setLoading(false);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 15000,
+          maximumAge: 0
         }
       );
     } else {
@@ -65,76 +104,153 @@ function Home() {
       setLoading(false);
     }
   };
-const handleSearch = async () => {
-  setLoading(true);
-  
-  try {
-    // Pehle check karo ki user ne manually address daala hai ya current location use karna hai
-    let pickupCoords;
-    
-    // Agar pickup field mein "Current Location" nahi hai aur user ne manually type kiya hai
-    if (pickup && pickup !== "Current Location" && !pickup.includes("Current Location")) {
-      // Manual address se coordinates lo
-      const pickupRes = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(pickup)}`
-      );
-      const pickupData = await pickupRes.json();
-      
-      if (pickupData.length > 0) {
-        pickupCoords = {
-          lat: parseFloat(pickupData[0].lat),
-          lng: parseFloat(pickupData[0].lon)
-        };
-      } else {
-        throw new Error("Pickup location not found");
-      }
-    } else {
-      // Current location use karo agar user ne "Use Current" button dabaya hai
-      const currentLocationData = JSON.parse(sessionStorage.getItem("currentLocation") || "{}");
-      
-      if (currentLocationData.lat && currentLocationData.lng) {
-        pickupCoords = {
-          lat: currentLocationData.lat,
-          lng: currentLocationData.lng
-        };
-      } else {
-        throw new Error("Current location not available. Please enter pickup location manually.");
-      }
-    }
-    
-    // Drop location coordinates lo
-    const dropRes = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(drop)}`
-    );
-    const dropData = await dropRes.json();
-    
-    if (dropData.length > 0) {
-      const dropCoords = {
-        lat: parseFloat(dropData[0].lat),
-        lng: parseFloat(dropData[0].lon)
-      };
-      
-      navigate("/map", {
-        state: {
-          pickupLocation: pickupCoords,
-          dropLocation: dropCoords,
-          pickupAddress: pickup,
-          dropAddress: drop
+
+  // ============== CALCULATE DISTANCE ==============
+  const calculateDistance = (lat1, lon1, lat2, lon2) => {
+    const R = 6371; // Earth's radius in km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+      Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return (R * c).toFixed(1);
+  };
+
+  // ============== GET FARE ESTIMATE ==============
+  const getEstimatedFare = async (pickupCoords, dropCoords) => {
+    try {
+      const res = await axios.get(`${API_URL}/api/fare/estimate`, {
+        params: {
+          pickupLat: pickupCoords.lat,
+          pickupLng: pickupCoords.lng,
+          dropLat: dropCoords.lat,
+          dropLng: dropCoords.lng,
+          vehicleType: 'Mini'
         }
       });
-    } else {
-      alert("Destination location not found");
+      if (res.data.success) {
+        setEstimatedFare(res.data.fare);
+        setShowEstimate(true);
+        setTimeout(() => setShowEstimate(false), 5000);
+      }
+    } catch (error) {
+      // Fallback calculation
+      const distance = calculateDistance(
+        pickupCoords.lat, pickupCoords.lng,
+        dropCoords.lat, dropCoords.lng
+      );
+      const baseFare = 50;
+      const perKm = 12;
+      const fare = baseFare + (distance * perKm);
+      setEstimatedFare(Math.round(fare));
+      setShowEstimate(true);
+      setTimeout(() => setShowEstimate(false), 5000);
     }
-  } catch (error) {
-    console.error("Error:", error);
-    alert(error.message || "Error finding locations. Please try again.");
-  }
-  
-  setLoading(false);
-};
+  };
 
-  const handleQuickSelect = (location) => {
-    setDrop(location);
+  // ============== HANDLE SEARCH ==============
+  const handleSearch = async () => {
+    if (!drop) {
+      alert("Please enter destination");
+      return;
+    }
+
+    setLoading(true);
+    
+    try {
+      // Get pickup coordinates
+      let pickupCoords;
+      const currentLocationData = JSON.parse(sessionStorage.getItem("currentLocation") || "{}");
+      
+      if (
+        usingCurrentLocation ||
+        pickup === "Current Location" ||
+        (currentLocationData.address && pickup === currentLocationData.address)
+      ) {
+        if (currentLocationData.lat && currentLocationData.lng) {
+          pickupCoords = {
+            lat: currentLocationData.lat,
+            lng: currentLocationData.lng,
+            address: currentLocationData.address || "Current Location"
+          };
+        } else {
+          throw new Error("Current location not available. Please tap Use Current again.");
+        }
+      } else if (pickup) {
+        const pickupRes = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(pickup)}`
+        );
+        const pickupData = await pickupRes.json();
+        
+        if (pickupData.length > 0) {
+          pickupCoords = {
+            lat: parseFloat(pickupData[0].lat),
+            lng: parseFloat(pickupData[0].lon),
+            address: pickup
+          };
+        } else {
+          throw new Error("Pickup location not found");
+        }
+      } else {
+        throw new Error("Please enter pickup location or tap Use Current.");
+      }
+      
+      // Get drop coordinates
+      const dropRes = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(drop)}`
+      );
+      const dropData = await dropRes.json();
+      
+      if (dropData.length > 0) {
+        const dropCoords = {
+          lat: parseFloat(dropData[0].lat),
+          lng: parseFloat(dropData[0].lon),
+          address: drop
+        };
+        
+        getEstimatedFare(pickupCoords, dropCoords);
+        
+        // Save search if user is logged in
+        if (user) {
+          try {
+            await axios.post(`${API_URL}/api/users/${user._id}/recent-search`, {
+              address: drop,
+              type: 'search'
+            });
+          } catch (error) {
+            console.log("Search not saved");
+          }
+        }
+        
+        // Navigate to map page
+        navigate("/map", {
+          state: {
+            pickupLocation: pickupCoords,
+            dropLocation: dropCoords,
+            pickupAddress: pickupCoords.address || pickup,
+            dropAddress: drop,
+            userId: user?._id,
+            estimatedFare: estimatedFare
+          }
+        });
+      } else {
+        alert("Destination location not found");
+      }
+    } catch (error) {
+      console.error("Error:", error);
+      alert(error.message || "Error finding locations. Please try again.");
+    }
+    
+    setLoading(false);
+  };
+
+  // ============== HANDLE LOGOUT ==============
+  const handleLogout = () => {
+    localStorage.removeItem('user');
+    setUser(null);
+    setShowProfileMenu(false);
   };
 
   return (
@@ -142,16 +258,39 @@ const handleSearch = async () => {
       {/* NAVBAR */}
       <nav style={styles.navbar}>
         <div style={styles.navLeft}>
-          <h2 style={styles.logo}>
+          <h2 style={styles.logo} onClick={() => navigate('/')}>
             <FaCar style={styles.logoIcon} />
             RIDE
           </h2>
         </div>
         
         <div style={styles.navRight}>
-          <button style={styles.navBtn}>Ride</button>
-          <button style={styles.navBtn}>Drive</button>
-          <button style={styles.navBtnPrimary}>Sign Up</button>
+          {user ? (
+            <div style={styles.userProfile} onClick={() => setShowProfileMenu(!showProfileMenu)}>
+              <div style={styles.avatar}>
+                {user.name?.charAt(0) || 'U'}
+              </div>
+              <span style={styles.userName}>{user.name?.split(' ')[0]}</span>
+              
+              {showProfileMenu && (
+                <div style={styles.profileMenu}>
+                  <div style={styles.menuItem} onClick={() => navigate('/profile')}>
+                    <FaUser size={12} /> My Profile
+                  </div>
+                  <div style={styles.menuItem} onClick={handleLogout}>
+                    <FaSignOutAlt size={12} /> Logout
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <button 
+              style={styles.navBtnPrimary}
+              onClick={() => window.location.href = '/login'}
+            >
+              Sign Up
+            </button>
+          )}
         </div>
       </nav>
 
@@ -168,22 +307,6 @@ const handleSearch = async () => {
             </h1>
             <p style={styles.subTitle}>Safe, reliable, and affordable rides at your fingertips</p>
 
-            {/* Tabs */}
-            <div style={styles.tabsContainer}>
-              {tabs.map((tab) => (
-                <button
-                  key={tab}
-                  style={{
-                    ...styles.tab,
-                    ...(activeTab === tab ? styles.activeTab : {})
-                  }}
-                  onClick={() => setActiveTab(tab)}
-                >
-                  {tab}
-                </button>
-              ))}
-            </div>
-
             {/* Input Fields */}
             <div style={styles.inputGroup}>
               <div style={styles.inputWrapper}>
@@ -192,7 +315,10 @@ const handleSearch = async () => {
                   placeholder="Enter pickup location"
                   style={styles.input}
                   value={pickup}
-                  onChange={(e) => setPickup(e.target.value)}
+                  onChange={(e) => {
+                    setPickup(e.target.value);
+                    setUsingCurrentLocation(false);
+                  }}
                 />
                 <button 
                   onClick={getCurrentLocation}
@@ -213,32 +339,29 @@ const handleSearch = async () => {
                 />
               </div>
 
-              {/* Recent Searches */}
-              {!drop && recentSearches.length > 0 && (
-                <div style={styles.recentSearches}>
-                  <p style={styles.recentTitle}>Recent destinations:</p>
-                  <div style={styles.recentList}>
-                    {recentSearches.map((item, index) => (
-                      <button
-                        key={index}
-                        style={styles.recentItem}
-                        onClick={() => handleQuickSelect(item)}
-                      >
-                        <FaClock style={styles.recentIcon} />
-                        {item}
-                      </button>
-                    ))}
-                  </div>
+              {/* Fare Estimate */}
+              {showEstimate && estimatedFare && (
+                <div style={styles.fareEstimate}>
+                  <span>Estimated fare: </span>
+                  <strong>₹{estimatedFare}</strong>
+                  <span> (may vary)</span>
                 </div>
               )}
 
               <button 
-                style={styles.searchBtn}
+                style={{
+                  ...styles.searchBtn,
+                  opacity: (!drop || loading) ? 0.7 : 1,
+                  cursor: (!drop || loading) ? 'not-allowed' : 'pointer'
+                }}
                 onClick={handleSearch}
-                disabled={loading || !drop}
+                disabled={!drop || loading}
               >
                 {loading ? (
-                  "LOADING..."
+                  <div style={styles.loader}>
+                    <div style={styles.spinner}></div>
+                    <span>Loading...</span>
+                  </div>
                 ) : (
                   <>
                     SEARCH CABS
@@ -261,7 +384,7 @@ const handleSearch = async () => {
           <div style={styles.featureCard}>
             <div style={styles.featureIcon}>🚗</div>
             <h4>50,000+ Rides</h4>
-            <p>Daily rides across cities</p>
+            <p>Rides across cities</p>
           </div>
           <div style={styles.featureCard}>
             <div style={styles.featureIcon}>⭐</div>
@@ -323,14 +446,6 @@ const handleSearch = async () => {
           </div>
 
           <div style={styles.footerSection}>
-            <h4>Services</h4>
-            <a href="#" style={styles.footerLink}>Daily Rides</a>
-            <a href="#" style={styles.footerLink}>Rental</a>
-            <a href="#" style={styles.footerLink}>Outstation</a>
-            <a href="#" style={styles.footerLink}>Airport</a>
-          </div>
-
-          <div style={styles.footerSection}>
             <h4>Support</h4>
             <a href="#" style={styles.footerLink}>Help Center</a>
             <a href="#" style={styles.footerLink}>Safety</a>
@@ -357,6 +472,7 @@ const handleSearch = async () => {
   );
 }
 
+// ============== STYLES ==============
 const styles = {
   container: {
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
@@ -377,7 +493,8 @@ const styles = {
   },
   navLeft: {
     display: "flex",
-    alignItems: "center"
+    alignItems: "center",
+    cursor: 'pointer'
   },
   logo: {
     margin: 0,
@@ -396,7 +513,8 @@ const styles = {
   navRight: {
     display: "flex",
     gap: "15px",
-    alignItems: "center"
+    alignItems: "center",
+    position: 'relative'
   },
   navBtn: {
     padding: "8px 20px",
@@ -406,10 +524,7 @@ const styles = {
     fontSize: "1rem",
     cursor: "pointer",
     borderRadius: "20px",
-    transition: "all 0.3s",
-    ':hover': {
-      background: "rgba(255,255,255,0.1)"
-    }
+    transition: "all 0.3s"
   },
   navBtnPrimary: {
     padding: "8px 25px",
@@ -420,11 +535,54 @@ const styles = {
     cursor: "pointer",
     borderRadius: "20px",
     fontWeight: "bold",
-    transition: "all 0.3s",
-    ':hover': {
-      background: "#45a049",
-      transform: "translateY(-2px)"
-    }
+    transition: "all 0.3s"
+  },
+  userProfile: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    cursor: 'pointer',
+    padding: '5px 12px',
+    borderRadius: '30px',
+    background: 'rgba(255,255,255,0.1)',
+    position: 'relative'
+  },
+  avatar: {
+    width: '32px',
+    height: '32px',
+    borderRadius: '50%',
+    background: '#4CAF50',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontWeight: 'bold',
+    fontSize: '16px'
+  },
+  userName: {
+    color: 'white',
+    fontSize: '14px',
+    fontWeight: '500'
+  },
+  profileMenu: {
+    position: 'absolute',
+    top: '45px',
+    right: 0,
+    background: 'white',
+    borderRadius: '8px',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+    padding: '8px 0',
+    minWidth: '150px',
+    zIndex: 1001
+  },
+  menuItem: {
+    padding: '10px 15px',
+    color: '#333',
+    fontSize: '14px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    cursor: 'pointer',
+    transition: 'background 0.2s'
   },
   hero: {
     position: "relative",
@@ -477,28 +635,6 @@ const styles = {
     color: "#666",
     marginBottom: "30px"
   },
-  tabsContainer: {
-    display: "flex",
-    gap: "10px",
-    marginBottom: "30px",
-    borderBottom: "2px solid #eee",
-    paddingBottom: "10px"
-  },
-  tab: {
-    padding: "10px 20px",
-    border: "none",
-    background: "transparent",
-    fontSize: "1rem",
-    cursor: "pointer",
-    color: "#666",
-    transition: "all 0.3s",
-    borderRadius: "20px",
-    fontWeight: "500"
-  },
-  activeTab: {
-    background: "#4CAF50",
-    color: "white"
-  },
   inputGroup: {
     display: "flex",
     flexDirection: "column",
@@ -524,12 +660,7 @@ const styles = {
     borderRadius: "12px",
     fontSize: "1rem",
     transition: "all 0.3s",
-    boxSizing: "border-box",
-    ':focus': {
-      borderColor: "#4CAF50",
-      outline: "none",
-      boxShadow: "0 0 0 3px rgba(76, 175, 80, 0.1)"
-    }
+    boxSizing: "border-box"
   },
   locationBtn: {
     position: "absolute",
@@ -544,44 +675,17 @@ const styles = {
     cursor: "pointer",
     fontSize: "0.9rem",
     fontWeight: "bold",
-    transition: "all 0.3s",
-    ':hover': {
-      background: "#45a049",
-      transform: "translateY(-50%) scale(1.05)"
-    }
+    transition: "all 0.3s"
   },
-  recentSearches: {
-    marginTop: "5px"
-  },
-  recentTitle: {
-    fontSize: "0.9rem",
-    color: "#666",
-    marginBottom: "8px"
-  },
-  recentList: {
-    display: "flex",
-    gap: "10px",
-    flexWrap: "wrap"
-  },
-  recentItem: {
-    display: "flex",
-    alignItems: "center",
-    gap: "5px",
-    padding: "5px 12px",
-    background: "#f5f5f5",
-    border: "none",
-    borderRadius: "20px",
-    fontSize: "0.9rem",
-    color: "#666",
-    cursor: "pointer",
-    transition: "all 0.3s",
-    ':hover': {
-      background: "#e8f5e8",
-      color: "#4CAF50"
-    }
-  },
-  recentIcon: {
-    fontSize: "0.8rem"
+  fareEstimate: {
+    marginTop: '10px',
+    padding: '12px',
+    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+    color: 'white',
+    borderRadius: '10px',
+    textAlign: 'center',
+    fontSize: '1rem',
+    animation: 'slideUp 0.3s ease'
   },
   searchBtn: {
     background: "#4CAF50",
@@ -597,20 +701,24 @@ const styles = {
     alignItems: "center",
     justifyContent: "center",
     gap: "10px",
-    marginTop: "10px",
-    ':hover': {
-      background: "#45a049",
-      transform: "translateY(-2px)",
-      boxShadow: "0 10px 25px rgba(76, 175, 80, 0.3)"
-    },
-    ':disabled': {
-      background: "#ccc",
-      cursor: "not-allowed",
-      transform: "none"
-    }
+    marginTop: "10px"
   },
   btnIcon: {
     fontSize: "1.2rem"
+  },
+  loader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '10px'
+  },
+  spinner: {
+    width: '20px',
+    height: '20px',
+    border: '2px solid rgba(255,255,255,0.3)',
+    borderTop: '2px solid white',
+    borderRadius: '50%',
+    animation: 'spin 1s linear infinite'
   },
   safetyBadge: {
     display: "flex",
@@ -645,11 +753,7 @@ const styles = {
     flex: 1,
     maxWidth: "250px",
     boxShadow: "0 10px 30px rgba(0,0,0,0.1)",
-    transition: "all 0.3s",
-    ':hover': {
-      transform: "translateY(-10px)",
-      boxShadow: "0 20px 40px rgba(0,0,0,0.2)"
-    }
+    transition: "all 0.3s"
   },
   featureIcon: {
     fontSize: "3rem",
@@ -734,19 +838,13 @@ const styles = {
     color: "#999",
     fontSize: "1.2rem",
     transition: "color 0.3s",
-    textDecoration: "none",
-    ':hover': {
-      color: "#4CAF50"
-    }
+    textDecoration: "none"
   },
   footerLink: {
     color: "#999",
     textDecoration: "none",
     fontSize: "0.95rem",
-    transition: "color 0.3s",
-    ':hover': {
-      color: "#4CAF50"
-    }
+    transition: "color 0.3s"
   },
   contactInfo: {
     display: "flex",
@@ -766,5 +864,35 @@ const styles = {
     color: "#666"
   }
 };
+
+// Add animations
+const style = document.createElement('style');
+style.textContent = `
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+  
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+  }
+  
+  .menuItem:hover {
+    background: #f5f5f5;
+  }
+`;
+document.head.appendChild(style);
 
 export default Home;

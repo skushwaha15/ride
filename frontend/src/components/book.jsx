@@ -1,244 +1,317 @@
-import React, { useState } from "react";
-import { 
-  FaUser,
-  FaPhone,
+import React, { useEffect, useMemo, useState } from "react";
+import {
   FaTimes,
-  FaClock
+  FaClock,
+  FaMapMarkerAlt,
+  FaCircle,
+  FaShieldAlt,
+  FaStar,
+  FaMoneyBillWave,
+  FaCreditCard,
+  FaWallet,
+  FaMobileAlt
 } from "react-icons/fa";
 import axios from 'axios';
 
+const API_URL = window.location.hostname === 'localhost' 
+  ? 'http://localhost:10000' 
+  : 'https://ride-backend-w20.onrender.com';
+
 function Book({ fare, vehicle, driver, pickupLocation, dropLocation, distance, duration, onClose, onRideRequested }) {
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState("cash");
   const [loading, setLoading] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState(localStorage.getItem('paymentMethod') || 'CASH');
+  const [paymentTiming, setPaymentTiming] = useState(localStorage.getItem('paymentTiming') || 'POSTPAID');
+  const [resolvedPickupAddress, setResolvedPickupAddress] = useState(pickupLocation?.address || '');
+  const [resolvedDropAddress, setResolvedDropAddress] = useState(dropLocation?.address || '');
+
+  useEffect(() => {
+    const resolveAddress = async (location, setter, fallback) => {
+      if (!location) {
+        setter(fallback);
+        return;
+      }
+
+      if (location.address) {
+        setter(location.address);
+        return;
+      }
+
+      if (typeof location.lat !== 'number' || typeof location.lng !== 'number') {
+        setter(fallback);
+        return;
+      }
+
+      try {
+        const res = await axios.get(`${API_URL}/api/geocode/reverse`, {
+          params: { lat: location.lat, lng: location.lng }
+        });
+        setter(res.data.shortAddress || res.data.address || fallback);
+      } catch (error) {
+        setter(`${location.lat.toFixed(4)}, ${location.lng.toFixed(4)}`);
+      }
+    };
+
+    resolveAddress(pickupLocation, setResolvedPickupAddress, 'Current location');
+    resolveAddress(dropLocation, setResolvedDropAddress, 'Destination');
+  }, [pickupLocation, dropLocation]);
+
+  useEffect(() => {
+    if (paymentTiming === 'PREPAID') {
+      setPaymentMethod('CARD');
+    }
+  }, [paymentTiming]);
+
+  const paymentOptions = useMemo(() => ([
+    { id: 'CARD', icon: <FaCreditCard size={16} />, label: 'Card', helper: 'Pay after ride' },
+    { id: 'CASH', icon: <FaMoneyBillWave size={16} />, label: 'Cash', helper: 'Pay after ride' },
+    { id: 'UPI', icon: <FaMobileAlt size={16} />, label: 'UPI', helper: 'Pay after ride' },
+    { id: 'WALLET', icon: <FaWallet size={16} />, label: 'Wallet', helper: 'Pay after ride' }
+  ]), []);
+
+  const pickupText = resolvedPickupAddress?.split(',')[0] || 'Current location';
+  const dropText = resolvedDropAddress?.split(',')[0] || 'Destination';
+  const formattedDistance = typeof distance === 'number' ? distance.toFixed(2) : 'Calculating';
 
   const handleConfirm = async () => {
-    if (!name || !phone) {
-      alert('Please fill all details');
-      return;
-    }
-
     setLoading(true);
     
     try {
-      console.log("🚀 Sending ride request...", {
-        driver,
-        pickupLocation,
-        dropLocation,
-        fare
-      });
+      let userId = localStorage.getItem('userId');
+      if (!userId) {
+        userId = 'user_' + Date.now();
+        localStorage.setItem('userId', userId);
+      }
 
-      const res = await axios.post('https://ride-backend-w2o0.onrender.com/api/rides/request', {
-        userId: 'user_' + Date.now(),
+      localStorage.setItem('paymentMethod', paymentMethod);
+      localStorage.setItem('paymentTiming', paymentTiming);
+
+      const rideRequest = {
+        userId: userId,
         driverId: driver?._id,
         pickupLocation: {
           lat: pickupLocation?.lat,
           lng: pickupLocation?.lng,
-          address: pickupLocation?.address || 'Pickup location'
+          address: resolvedPickupAddress || pickupLocation?.address || 'Pickup location'
         },
         dropLocation: {
           lat: dropLocation?.lat,
           lng: dropLocation?.lng,
-          address: dropLocation?.address || 'Drop location'
+          address: resolvedDropAddress || dropLocation?.address || 'Drop location'
         },
         fare: fare,
         distance: distance,
         duration: duration,
-        status: 'searching'
-      });
+        vehicleType: driver?.vehicleType || vehicle?.vehicleType || vehicle?.type || 'Mini',
+        vehicleNumber: driver?.vehicleNumber || vehicle?.vehicleNumber,
+        paymentMethod,
+        paymentTiming,
+        status: 'SEARCHING'
+      };
 
-      console.log("✅ Ride request response:", res.data);
+      if (paymentTiming === 'PREPAID') {
+        const bookingRef = `booking_${Date.now()}`;
+        const prepaidRideRequest = {
+          ...rideRequest,
+          paymentMethod: 'CARD',
+          paymentTiming: 'PREPAID',
+          paymentStatus: 'COMPLETED',
+          bookingRef
+        };
 
-      if (onRideRequested) {
-        onRideRequested(res.data.ride);
+        localStorage.setItem('pendingPrepaidRideRequest', JSON.stringify(prepaidRideRequest));
+
+        const paymentRes = await axios.post(
+          `${API_URL}/api/payments/create-checkout-session`,
+          {
+            amount: fare,
+            userId,
+            driverId: driver?._id,
+            bookingRef
+          }
+        );
+
+        if (!paymentRes.data.url) {
+          throw new Error('Stripe checkout URL was not returned');
+        }
+
+        window.location.assign(paymentRes.data.url);
+        return;
       }
 
-      alert(`🎉 Ride Request Sent!\n\nSearching for drivers near you...`);
+      const res = await axios.post(`${API_URL}/api/rides/request`, rideRequest);
+      
+      localStorage.setItem('currentRideId', res.data.ride._id);
+
+      onRideRequested(res.data.ride);
       onClose();
       
     } catch (error) {
-      console.error("❌ Error sending ride request:", error);
-      alert('Failed to send ride request. Please try again.');
+      alert(error.response?.data?.error || error.message || 'Failed to request ride');
     } finally {
       setLoading(false);
     }
   };
 
+  // Format time
+  const formatTime = (minutes) => {
+    if (typeof minutes !== 'number' || !Number.isFinite(minutes)) {
+      return 'Calculating';
+    }
+
+    const roundedMinutes = Math.max(1, Math.ceil(minutes));
+    if (roundedMinutes < 60) return `${roundedMinutes} min`;
+    const hours = Math.floor(roundedMinutes / 60);
+    const mins = roundedMinutes % 60;
+    return mins ? `${hours} hr ${mins} min` : `${hours} hr`;
+  };
+
   return (
-    <div style={styles.overlay}>
-      <div style={styles.modal}>
-        {/* Fixed Header */}
+    <>
+      <div style={styles.overlay}>
+        <div style={styles.modal}>
+        {/* Header with just close button */}
         <div style={styles.header}>
-          <h2 style={styles.title}>Confirm Your Ride</h2>
-          <FaTimes style={styles.closeIcon} onClick={onClose} />
+          <button onClick={onClose} style={styles.closeButton}>
+            <FaTimes size={20} color="#000" />
+          </button>
+          <h2 style={styles.title}>Confirm ride</h2>
+          <div style={styles.placeholder}></div>
         </div>
 
-        {/* Scrollable Content */}
-        <div style={styles.scrollableContent}>
-          {/* Vehicle Info Card */}
-          <div style={styles.vehicleCard}>
-            <div style={styles.vehicleIconLarge}>
+        {/* Trip Route - Simple and clean */}
+        <div style={styles.routeContainer}>
+          <div style={styles.routePoint}>
+            <FaCircle size={8} color="#10b981" />
+            <span style={styles.routeText}>{pickupText}</span>
+          </div>
+          <div style={styles.routeLine}></div>
+          <div style={styles.routePoint}>
+            <FaMapMarkerAlt size={8} color="#ef4444" />
+            <span style={styles.routeText}>{dropText}</span>
+          </div>
+        </div>
+
+        {/* Vehicle Card - Uber style */}
+        <div style={styles.vehicleCard}>
+          <div style={styles.vehicleLeft}>
+            <span style={styles.vehicleIcon}>
               {vehicle?.type === 'Mini' ? '🚗' : 
                vehicle?.type === 'Sedan' ? '🚙' : 
                vehicle?.type === 'SUV' ? '🚐' : '🛺'}
+            </span>
+          </div>
+          <div style={styles.vehicleCenter}>
+            <div style={styles.vehicleNameRow}>
+              <span style={styles.vehicleName}>{vehicle?.type || 'Mini'}</span>
+              <span style={styles.rating}>
+                <FaStar size={12} color="#fbbf24" />
+                <span>{driver?.rating || 4.9}</span>
+              </span>
             </div>
-            <div style={styles.vehicleDetails}>
-              <div style={styles.vehicleNameRow}>
-                <h3 style={styles.vehicleName}>{vehicle?.type || 'Mini'}</h3>
-                <span style={styles.rating}>⭐ {driver?.rating || 4.9}</span>
-              </div>
-              <p style={styles.driverName}>{driver?.name || 'Professional Driver'}</p>
-              <p style={styles.vehicleNumber}>{driver?.vehicleNumber || 'RJ14 XX 1234'}</p>
-              <div style={styles.etaBadge}>
-                <FaClock style={{ marginRight: '5px' }} /> Arrives in {vehicle?.eta || '2-3'} min
-              </div>
-            </div>
-            <div style={styles.fareLarge}>
-              <span style={styles.fareAmount}>₹{fare}</span>
-              <span style={styles.fareLabel}>total</span>
+            <div style={styles.vehicleMeta}>
+              <span style={styles.metaItem}>
+                <FaClock size={12} /> {formatTime(duration)}
+              </span>
+              <span style={styles.metaItem}>
+                📏 {formattedDistance} km
+              </span>
             </div>
           </div>
-
-          {/* Trip Route */}
-          <div style={styles.routeCard}>
-            <div style={styles.routePoint}>
-              <div style={styles.pointDotGreen}></div>
-              <div style={styles.pointAddress}>
-                <span style={styles.pointLabel}>PICKUP</span>
-                <p style={styles.address}>{pickupLocation?.address || 'Pickup location'}</p>
-              </div>
-            </div>
-            
-            <div style={styles.routeLine}></div>
-            
-            <div style={styles.routePoint}>
-              <div style={styles.pointDotRed}></div>
-              <div style={styles.pointAddress}>
-                <span style={styles.pointLabel}>DROP</span>
-                <p style={styles.address}>{dropLocation?.address || 'Drop location'}</p>
-              </div>
-            </div>
-            
-            <div style={styles.tripMeta}>
-              <span style={styles.metaItem}>📏 {distance} km</span>
-              <span style={styles.metaItem}>⏱️ {duration} mins</span>
-            </div>
-          </div>
-
-          {/* Passenger Details Form */}
-          <div style={styles.formSection}>
-            <h4 style={styles.sectionTitle}>Passenger Details</h4>
-            
-            <div style={styles.inputGroup}>
-              <FaUser style={styles.inputIcon} />
-              <input
-                style={styles.input}
-                type="text"
-                placeholder="Full Name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-
-            <div style={styles.inputGroup}>
-              <FaPhone style={styles.inputIcon} />
-              <input
-                style={styles.input}
-                type="tel"
-                placeholder="Phone Number"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-              />
-            </div>
-          </div>
-
-          {/* Payment Methods */}
-          <div style={styles.paymentSection}>
-            <h4 style={styles.sectionTitle}>Payment Method</h4>
-            <div style={styles.paymentGrid}>
-              <button 
-                style={{
-                  ...styles.paymentCard,
-                  ...(paymentMethod === 'cash' && styles.paymentCardActive)
-                }}
-                onClick={() => setPaymentMethod('cash')}
-              >
-                <span style={styles.paymentEmoji}>💵</span>
-                <span style={styles.paymentName}>Cash</span>
-              </button>
-              
-              <button 
-                style={{
-                  ...styles.paymentCard,
-                  ...(paymentMethod === 'card' && styles.paymentCardActive)
-                }}
-                onClick={() => setPaymentMethod('card')}
-              >
-                <span style={styles.paymentEmoji}>💳</span>
-                <span style={styles.paymentName}>Card</span>
-              </button>
-              
-              <button 
-                style={{
-                  ...styles.paymentCard,
-                  ...(paymentMethod === 'upi' && styles.paymentCardActive)
-                }}
-                onClick={() => setPaymentMethod('upi')}
-              >
-                <span style={styles.paymentEmoji}>📱</span>
-                <span style={styles.paymentName}>UPI</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Price Breakdown */}
-          <div style={styles.priceBreakdown}>
-            <h4 style={styles.sectionTitle}>Fare Breakdown</h4>
-            <div style={styles.priceRow}>
-              <span>Base Fare</span>
-              <span>₹{Math.round(fare * 0.8)}</span>
-            </div>
-            <div style={styles.priceRow}>
-              <span>Distance Charge</span>
-              <span>₹{Math.round(fare * 0.15)}</span>
-            </div>
-            <div style={styles.priceRow}>
-              <span>Service Fee</span>
-              <span>₹{Math.round(fare * 0.05)}</span>
-            </div>
-            <div style={styles.totalRow}>
-              <span>Total</span>
-              <span>₹{fare}</span>
-            </div>
+          <div style={styles.vehicleRight}>
+            <span style={styles.fare}>₹{fare}</span>
           </div>
         </div>
 
-        {/* Fixed Footer with Confirm Button */}
-        <div style={styles.footer}>
+        {/* Payment Method - Simple */}
+        <div style={styles.paymentCard}>
+          <div style={styles.paymentHeader}>
+            <span style={styles.paymentTitle}>Payment method</span>
+            <span style={styles.paymentBadge}>{paymentTiming === 'PREPAID' ? 'Prepaid' : 'Postpaid'}</span>
+          </div>
+          <div style={styles.paymentTimingRow}>
+            <button
+              type="button"
+              onClick={() => setPaymentTiming('POSTPAID')}
+              style={{
+                ...styles.paymentTimingButton,
+                ...(paymentTiming === 'POSTPAID' ? styles.paymentTimingButtonSelected : {})
+              }}
+            >
+              Pay after ride
+            </button>
+            <button
+              type="button"
+              onClick={() => setPaymentTiming('PREPAID')}
+              style={{
+                ...styles.paymentTimingButton,
+                ...(paymentTiming === 'PREPAID' ? styles.paymentTimingButtonSelected : {})
+              }}
+            >
+              Prepay now
+            </button>
+          </div>
+          <div style={styles.paymentOptions}>
+            {paymentOptions.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => {
+                  setPaymentMethod(option.id);
+                  if (option.id !== 'CARD') {
+                    setPaymentTiming('POSTPAID');
+                  }
+                }}
+                style={{
+                  ...styles.paymentOption,
+                  ...(paymentMethod === option.id ? styles.paymentOptionSelected : {}),
+                  ...(paymentTiming === 'PREPAID' && option.id !== 'CARD' ? styles.paymentOptionDisabled : {})
+                }}
+                disabled={paymentTiming === 'PREPAID' && option.id !== 'CARD'}
+              >
+                <span style={styles.paymentOptionIcon}>{option.icon}</span>
+                <span style={styles.paymentOptionText}>
+                  <span style={styles.paymentLabel}>{option.label}</span>
+                  <span style={styles.paymentValue}>{option.helper}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Safety Info */}
+        <div style={styles.safetyCard}>
+          <FaShieldAlt size={16} color="#10b981" />
+          <span style={styles.safetyText}>Your safety is our priority</span>
+        </div>
+
+        {/* Confirm Button */}
           <button 
-            style={{
-              ...styles.confirmButton,
-              opacity: (!name || !phone || loading) ? 0.7 : 1,
-              background: loading ? '#999' : '#4CAF50'
-            }}
+            style={styles.confirmButton}
             onClick={handleConfirm}
-            disabled={!name || !phone || loading}
+            disabled={loading}
           >
             {loading ? (
-              <div style={styles.loadingContainer}>
-                <div style={styles.buttonSpinner}></div>
-                <span>Requesting...</span>
-              </div>
-            ) : (
-              'Confirm & Request Ride'
+                <div style={styles.loader}>
+                  <div style={styles.spinner}></div>
+                  <span>{paymentTiming === 'PREPAID' ? 'Preparing payment...' : 'Finding driver...'}</span>
+                </div>
+              ) : (
+              paymentTiming === 'PREPAID' ? 'Book and prepay' : 'Request ride'
             )}
           </button>
+
+          {/* Small note */}
+          <p style={styles.note}>
+            {paymentTiming === 'PREPAID'
+              ? 'Stripe payment opens now and the ride will be marked prepaid.'
+              : 'You will complete payment after the ride.'}
+          </p>
         </div>
       </div>
-    </div>
+    </>
   );
 }
+
 const styles = {
   overlay: {
     position: 'fixed',
@@ -246,306 +319,266 @@ const styles = {
     left: 0,
     right: 0,
     bottom: 0,
-    background: 'rgba(0,0,0,0.6)',
+    background: 'rgba(0, 0, 0, 0.5)',
     display: 'flex',
-    alignItems: 'center',
+    alignItems: 'flex-end',
     justifyContent: 'center',
-    zIndex: 2000,
-    backdropFilter: 'blur(8px)',
-    animation: 'fadeIn 0.3s ease'
+    zIndex: 2000
   },
   modal: {
-    background: 'white',
-    borderRadius: '30px',
-    width: '90%',
-    maxWidth: '420px',
-    maxHeight: '85vh',
-    display: 'flex',
-    flexDirection: 'column',
-    boxShadow: '0 30px 60px rgba(0,0,0,0.4)',
-    animation: 'slideUp 0.3s ease'
+    background: '#ffffff',
+    width: '100%',
+    maxWidth: '400px',
+    borderTopLeftRadius: '24px',
+    borderTopRightRadius: '24px',
+    padding: '20px 20px 30px 20px',
+    animation: 'slideUp 0.2s ease'
   },
   header: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '20px',
-    borderBottom: '1px solid #f0f0f0',
-    background: 'white',
-    borderRadius: '30px 30px 0 0'
+    marginBottom: '24px'
+  },
+  closeButton: {
+    background: 'none',
+    border: 'none',
+    padding: '8px',
+    cursor: 'pointer',
+    borderRadius: '50%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center'
   },
   title: {
     margin: 0,
-    fontSize: '1.4rem',
-    fontWeight: '600',
-    color: '#333'
+    fontSize: '18px',
+    fontWeight: '500',
+    color: '#000'
   },
-  closeIcon: {
-    fontSize: '1.5rem',
-    cursor: 'pointer',
-    color: '#999',
-    transition: 'color 0.2s',
-    ':hover': {
-      color: '#666'
-    }
+  placeholder: {
+    width: '36px'
   },
-  scrollableContent: {
-    flex: 1,
-    overflowY: 'auto',
-    padding: '20px',
+  routeContainer: {
+    marginBottom: '24px'
+  },
+  routePoint: {
     display: 'flex',
-    flexDirection: 'column',
-    gap: '20px'
+    alignItems: 'center',
+    gap: '12px',
+    padding: '4px 0'
+  },
+  routeText: {
+    fontSize: '16px',
+    color: '#000',
+    fontWeight: '400'
+  },
+  routeLine: {
+    width: '2px',
+    height: '20px',
+    background: '#e5e7eb',
+    marginLeft: '3px',
+    marginTop: '2px',
+    marginBottom: '2px'
   },
   vehicleCard: {
     display: 'flex',
-    background: '#f8f9fa',
-    borderRadius: '20px',
-    padding: '15px',
-    border: '1px solid #eee'
+    alignItems: 'center',
+    padding: '16px 0',
+    borderTop: '1px solid #f3f4f6',
+    borderBottom: '1px solid #f3f4f6',
+    marginBottom: '16px'
   },
-  vehicleIconLarge: {
-    fontSize: '3rem',
-    marginRight: '15px'
+  vehicleLeft: {
+    width: '48px',
+    height: '48px',
+    borderRadius: '8px',
+    background: '#f3f4f6',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: '12px'
   },
-  vehicleDetails: {
+  vehicleIcon: {
+    fontSize: '28px'
+  },
+  vehicleCenter: {
     flex: 1
   },
   vehicleNameRow: {
     display: 'flex',
     alignItems: 'center',
-    gap: '10px',
+    gap: '8px',
     marginBottom: '4px'
   },
   vehicleName: {
-    margin: 0,
-    fontSize: '1.2rem',
-    fontWeight: '600'
+    fontSize: '16px',
+    fontWeight: '500',
+    color: '#000'
   },
   rating: {
-    fontSize: '0.9rem',
-    color: '#f39c12'
-  },
-  driverName: {
-    margin: '2px 0',
-    color: '#666',
-    fontSize: '0.95rem'
-  },
-  vehicleNumber: {
-    margin: '2px 0',
-    color: '#999',
-    fontSize: '0.85rem'
-  },
-  etaBadge: {
-    display: 'inline-flex',
+    display: 'flex',
     alignItems: 'center',
-    background: '#e3f2fd',
-    color: '#1976d2',
-    padding: '4px 10px',
-    borderRadius: '20px',
-    fontSize: '0.85rem',
-    marginTop: '8px'
+    gap: '4px',
+    fontSize: '14px',
+    color: '#6b7280'
   },
-  fareLarge: {
+  vehicleMeta: {
     display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'flex-end',
-    justifyContent: 'center'
-  },
-  fareAmount: {
-    fontSize: '1.6rem',
-    fontWeight: '700',
-    color: '#4CAF50'
-  },
-  fareLabel: {
-    fontSize: '0.8rem',
-    color: '#999'
-  },
-  routeCard: {
-    background: '#f8f9fa',
-    borderRadius: '20px',
-    padding: '20px',
-    border: '1px solid #eee'
-  },
-  routePoint: {
-    display: 'flex',
-    alignItems: 'flex-start',
-    gap: '12px'
-  },
-  pointDotGreen: {
-    width: '12px',
-    height: '12px',
-    background: '#4CAF50',
-    borderRadius: '50%',
-    marginTop: '4px',
-    boxShadow: '0 0 0 3px rgba(76, 175, 80, 0.2)'
-  },
-  pointDotRed: {
-    width: '12px',
-    height: '12px',
-    background: '#f44336',
-    borderRadius: '50%',
-    marginTop: '4px',
-    boxShadow: '0 0 0 3px rgba(244, 67, 54, 0.2)'
-  },
-  pointAddress: {
-    flex: 1
-  },
-  pointLabel: {
-    fontSize: '0.7rem',
-    color: '#999',
-    letterSpacing: '0.5px'
-  },
-  address: {
-    margin: '2px 0 0',
-    fontSize: '0.95rem',
-    color: '#333'
-  },
-  routeLine: {
-    width: '2px',
-    height: '30px',
-    background: '#ddd',
-    marginLeft: '5px',
-    marginTop: '5px',
-    marginBottom: '5px'
-  },
-  tripMeta: {
-    display: 'flex',
-    gap: '15px',
-    marginTop: '15px',
-    paddingTop: '15px',
-    borderTop: '1px dashed #ddd'
+    gap: '16px'
   },
   metaItem: {
-    fontSize: '0.9rem',
-    color: '#666'
+    fontSize: '14px',
+    color: '#6b7280',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px'
   },
-  formSection: {
-    background: '#f8f9fa',
-    borderRadius: '20px',
-    padding: '20px',
-    border: '1px solid #eee'
+  vehicleRight: {
+    textAlign: 'right'
   },
-  sectionTitle: {
-    margin: '0 0 15px',
-    fontSize: '1.1rem',
-    color: '#333'
-  },
-  inputGroup: {
-    position: 'relative',
-    marginBottom: '12px'
-  },
-  inputIcon: {
-    position: 'absolute',
-    left: '15px',
-    top: '50%',
-    transform: 'translateY(-50%)',
-    color: '#999',
-    fontSize: '1rem'
-  },
-  input: {
-    width: '100%',
-    padding: '15px 15px 15px 45px',
-    border: '2px solid #eee',
-    borderRadius: '15px',
-    fontSize: '1rem',
-    boxSizing: 'border-box',
-    transition: 'border-color 0.2s',
-    outline: 'none',
-    ':focus': {
-      borderColor: '#4CAF50'
-    }
-  },
-  paymentSection: {
-    background: '#f8f9fa',
-    borderRadius: '20px',
-    padding: '20px',
-    border: '1px solid #eee'
-  },
-  paymentGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(3, 1fr)',
-    gap: '10px'
+  fare: {
+    fontSize: '18px',
+    fontWeight: '600',
+    color: '#000'
   },
   paymentCard: {
+    padding: '16px 0',
+    borderBottom: '1px solid #f3f4f6',
+    marginBottom: '16px',
+  },
+  paymentHeader: {
     display: 'flex',
-    flexDirection: 'column',
+    justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: '12px'
+  },
+  paymentTitle: {
+    fontSize: '15px',
+    fontWeight: '600',
+    color: '#111827'
+  },
+  paymentBadge: {
+    fontSize: '12px',
+    fontWeight: '600',
+    color: '#635bff',
+    background: '#eef2ff',
+    padding: '4px 8px',
+    borderRadius: '999px'
+  },
+  paymentOptions: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '10px'
+  },
+  paymentTimingRow: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '10px',
+    marginBottom: '10px'
+  },
+  paymentTimingButton: {
+    border: '1px solid #e5e7eb',
+    borderRadius: '10px',
+    background: '#fff',
+    padding: '10px 12px',
+    cursor: 'pointer',
+    fontSize: '13px',
+    fontWeight: '600',
+    color: '#374151'
+  },
+  paymentTimingButtonSelected: {
+    border: '1px solid #635bff',
+    background: '#f5f3ff',
+    color: '#4f46e5'
+  },
+  paymentOption: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    border: '1px solid #e5e7eb',
+    borderRadius: '10px',
+    background: '#fff',
     padding: '12px',
-    border: '2px solid #eee',
-    borderRadius: '15px',
-    background: 'white',
-    cursor: 'pointer',
-    transition: 'all 0.2s',
-    gap: '8px'
+    textAlign: 'left',
+    cursor: 'pointer'
   },
-  paymentCardActive: {
-    borderColor: '#4CAF50',
-    background: '#e8f5e8'
+  paymentOptionSelected: {
+    border: '1px solid #635bff',
+    background: '#f5f3ff'
   },
-  paymentEmoji: {
-    fontSize: '1.8rem'
+  paymentOptionDisabled: {
+    opacity: 0.45,
+    cursor: 'not-allowed'
   },
-  paymentName: {
-    fontSize: '0.9rem',
-    fontWeight: '500'
-  },
-  priceBreakdown: {
-    background: '#f8f9fa',
-    borderRadius: '20px',
-    padding: '20px',
-    border: '1px solid #eee'
-  },
-  priceRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    padding: '8px 0',
-    color: '#666'
-  },
-  totalRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    padding: '12px 0 0',
-    marginTop: '8px',
-    borderTop: '2px solid #ddd',
-    fontSize: '1.2rem',
-    fontWeight: '600',
-    color: '#333'
-  },
-  footer: {
-    padding: '20px',
-    borderTop: '1px solid #f0f0f0',
-    background: 'white',
-    borderRadius: '0 0 30px 30px'
-  },
-  confirmButton: {
-    width: '100%',
-    padding: '18px',
-    background: '#4CAF50',
-    color: 'white',
-    border: 'none',
-    borderRadius: '50px',
-    fontSize: '1.2rem',
-    fontWeight: '600',
-    cursor: 'pointer',
-    transition: 'all 0.2s',
-    boxShadow: '0 5px 15px rgba(76, 175, 80, 0.3)',
-    ':hover': {
-      transform: 'translateY(-2px)',
-      boxShadow: '0 8px 20px rgba(76, 175, 80, 0.4)'
-    }
-  },
-  loadingContainer: {
+  paymentOptionIcon: {
+    width: '32px',
+    height: '32px',
+    borderRadius: '8px',
+    background: '#f3f4f6',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: '10px'
+    color: '#374151',
+    flexShrink: 0
   },
-  buttonSpinner: {
+  paymentOptionText: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px'
+  },
+  paymentLabel: {
+    fontSize: '14px',
+    fontWeight: '600',
+    color: '#000'
+  },
+  paymentValue: {
+    fontSize: '12px',
+    color: '#6b7280'
+  },
+  safetyCard: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '12px',
+    background: '#f3f4f6',
+    borderRadius: '12px',
+    marginBottom: '24px'
+  },
+  safetyText: {
+    fontSize: '14px',
+    color: '#374151'
+  },
+  confirmButton: {
+    width: '100%',
+    padding: '16px',
+    background: '#000',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '50px',
+    fontSize: '18px',
+    fontWeight: '500',
+    cursor: 'pointer',
+    marginBottom: '12px',
+    transition: 'background 0.2s'
+  },
+  note: {
+    textAlign: 'center',
+    fontSize: '14px',
+    color: '#9ca3af',
+    margin: 0
+  },
+  loader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px'
+  },
+  spinner: {
     width: '20px',
     height: '20px',
-    border: '3px solid rgba(255,255,255,0.3)',
-    borderTop: '3px solid white',
+    border: '2px solid rgba(255,255,255,0.3)',
+    borderTop: '2px solid white',
     borderRadius: '50%',
     animation: 'spin 1s linear infinite'
   }
@@ -554,18 +587,11 @@ const styles = {
 // Add animations
 const style = document.createElement('style');
 style.textContent = `
-  @keyframes fadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-  
   @keyframes slideUp {
     from {
-      opacity: 0;
-      transform: translateY(50px);
+      transform: translateY(100%);
     }
     to {
-      opacity: 1;
       transform: translateY(0);
     }
   }
