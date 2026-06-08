@@ -11,7 +11,7 @@ require('dotenv').config();
 
 // 🌐 Force IPv4
 dns.setDefaultResultOrder('ipv4first');
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"; // Development ke liye
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"; 
 
 // 🎯 Environment detection
 const isProduction = process.env.NODE_ENV === 'production';
