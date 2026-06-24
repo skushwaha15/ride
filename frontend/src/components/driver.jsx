@@ -13,7 +13,7 @@ const isLocalDevelopment = window.location.hostname === 'localhost' ||
 
 const API_URL = isLocalDevelopment 
   ? 'http://localhost:10000'
-  : 'https://ride-backend-w20.onrender.com';
+  : 'https://ride-backend-w2o0.onrender.com';
 
 console.log(`🌐 User App - Environment: ${isLocalDevelopment ? 'LOCAL' : 'PRODUCTION'}`);
 console.log(`🌐 User App - API URL: ${API_URL}`);

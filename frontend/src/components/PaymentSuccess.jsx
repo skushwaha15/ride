@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 
 const API_URL = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
   ? "http://localhost:10000"
-  : "https://ride-backend-w20.onrender.com";
+  : "https://ride-backend-w2o0.onrender.com";
 
 function PaymentSuccess() {
   const [message, setMessage] = useState("Confirming your payment...");

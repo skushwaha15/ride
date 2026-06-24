@@ -22,7 +22,7 @@ import axios from 'axios';
 // API URL - environment based
 const API_URL = window.location.hostname === 'localhost' 
   ? 'http://localhost:10000' 
-  : 'https://ride-backend-w20.onrender.com';
+  : 'https://ride-backend-w2o0.onrender.com';
 
 function Home() {
   const navigate = useNavigate();

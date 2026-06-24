@@ -6,7 +6,7 @@ import { useMap } from "react-leaflet";
 
 const API_URL = process.env.REACT_APP_API_URL || (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   ? 'http://localhost:10000'
-  : 'https://ride-backend-w20.onrender.com');
+  : 'https://ride-backend-w2o0.onrender.com');
 
 function ChangeView({ center, bounds }) {
   const map = useMap();

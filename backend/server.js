@@ -31,7 +31,7 @@ const allowedOrigins = [
   'http://127.0.0.1:3000',
   'http://127.0.0.1:3001',
   'https://ride-wmqa.vercel.app',
-  'https://ride-backend-w20.onrender.com',
+  'https://ride-backend-w2o0.onrender.com',
   ...(process.env.FRONTEND_URLS || process.env.FRONTEND_URL || '')
     .split(',')
     .map(normalizeOrigin)
@@ -1898,6 +1898,6 @@ server.listen(PORT, () => {
   console.log(`📱 Frontend URL: http://localhost:3000`);
   console.log(`🚗 Driver App URL: http://localhost:3001`);
   if (isProduction) {
-    console.log(`🌍 Live URL: https://ride-backend-w20.onrender.com`);
+    console.log(`🌍 Live URL: https://ride-backend-w2o0.onrender.com`);
   }
 });

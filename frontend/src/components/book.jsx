@@ -15,7 +15,7 @@ import axios from 'axios';
 
 const API_URL = window.location.hostname === 'localhost' 
   ? 'http://localhost:10000' 
-  : 'https://ride-backend-w20.onrender.com';
+  : 'https://ride-backend-w2o0.onrender.com';
 
 function Book({ fare, vehicle, driver, pickupLocation, dropLocation, distance, duration, onClose, onRideRequested }) {
   const [loading, setLoading] = useState(false);

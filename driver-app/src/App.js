@@ -10,7 +10,7 @@ const isLocalDevelopment = window.location.hostname === 'localhost' ||
 
 const API_URL = isLocalDevelopment 
   ? 'http://localhost:10000'
-  : 'https://ride-backend-w20.onrender.com';
+  : 'https://ride-backend-w2o0.onrender.com';
 const ACTIVE_RIDE_STATUSES = ['ACCEPTED', 'ARRIVING', 'STARTED'];
 
 console.log(`🌐 Environment: ${isLocalDevelopment ? 'LOCAL' : 'PRODUCTION'}`);
