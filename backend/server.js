@@ -23,6 +23,8 @@ const app = express();
 const server = http.createServer(app);
 
 // CORS configuration
+const normalizeOrigin = (origin = '') => origin.trim().replace(/\/$/, '');
+
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
@@ -32,24 +34,31 @@ const allowedOrigins = [
   'https://ride-backend-w20.onrender.com',
   ...(process.env.FRONTEND_URLS || process.env.FRONTEND_URL || '')
     .split(',')
-    .map((origin) => origin.trim())
+    .map(normalizeOrigin)
 ].filter(Boolean);
+
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
+
+  const normalizedOrigin = normalizeOrigin(origin);
+  return allowedOrigins.includes(normalizedOrigin)
+    || /^https:\/\/ride-[a-z0-9-]+\.vercel\.app$/i.test(normalizedOrigin);
+};
 
 const corsOptions = {
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-      return;
-    }
-
-    callback(new Error(`Origin ${origin} is not allowed by CORS`));
+    callback(null, isAllowedOrigin(origin));
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 };
 
 const io = socketIo(server, {
   cors: {
-    origin: allowedOrigins,
+    origin(origin, callback) {
+      callback(null, isAllowedOrigin(origin));
+    },
     methods: ["GET", "POST"],
     credentials: true
   }
@@ -334,6 +343,7 @@ const sendEmailWithBrevo = ({ to, subject, htmlContent, textContent }) => {
 
 // Middleware
 app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(express.json());
 
 // 📦 MongoDB Connection
