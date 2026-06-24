@@ -972,6 +972,10 @@ app.post('/api/rides/verify-otp', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+app.use((req, res, next) => {
+  console.log("REQUEST:", req.method, req.url);
+  next();
+});
 
 app.get('/api/rides/:rideId/chat', async (req, res) => {
   try {
